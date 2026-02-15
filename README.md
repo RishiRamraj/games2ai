@@ -41,16 +41,17 @@ python bridge.py --poll-hz 8
 
 ## Commands
 
-| Command    | Description                       |
-|------------|-----------------------------------|
-| `pos`      | Current position, room, direction |
-| `health`   | Health, magic, resources          |
-| `items`    | Equipment and inventory           |
-| `enemies`  | Nearby enemies and directions     |
-| `progress` | Pendants, crystals, progress      |
-| `status`   | RetroArch connection status       |
-| `help`     | List commands                     |
-| `quit`     | Exit                              |
+| Command    | Description                            |
+|------------|----------------------------------------|
+| `pos`      | Current position, room, direction      |
+| `look`     | Description of the current area        |
+| `health`   | Health, magic, resources               |
+| `items`    | Equipment and inventory                |
+| `enemies`  | Nearby enemies and directions          |
+| `progress` | Pendants, crystals, progress           |
+| `status`   | RetroArch connection status            |
+| `help`     | List commands                          |
+| `quit`     | Exit                                   |
 
 ## Event System
 
@@ -58,13 +59,17 @@ The bridge polls ~50 memory addresses at ~4 Hz and detects game events by diffin
 
 - Damage taken, low health warning, death
 - Item, key, and equipment pickups
-- Room and area changes (overworld and dungeon)
-- Dungeon enter/exit, floor changes
+- Room and area changes with area descriptions (overworld and dungeon)
+- Dungeon enter/exit with dungeon descriptions, floor changes
 - World transitions (light/dark)
 - Enemy proximity alerts with compass direction
 - Dialog text (read from a text dump file)
 - Swimming, pit warnings, boss victories
 - Progress milestones (pendants, crystals)
+
+## Area Descriptions
+
+When moving between overworld screens or entering dungeons, the bridge announces the area name along with a description covering exits, hazards, landmarks, and key information. Use the `look` command at any time to hear the description of your current area. All 13 dungeons (Hyrule Castle through Ganon's Tower) are identified by room ID and described with boss names, required items, and key mechanics.
 
 ## Dialog Text
 

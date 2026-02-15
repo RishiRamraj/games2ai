@@ -350,6 +350,266 @@ OVERWORLD_NAMES = {
     0x77: "Dark World Lake Hylia",
 }
 
+# Accessibility descriptions for overworld areas.
+# Each entry describes exits, hazards, landmarks, and NPCs.
+OVERWORLD_DESCRIPTIONS: dict[int, str] = {
+    # Light World
+    0x00: ("Dense maze of trees. Follow the correct path or be sent back "
+           "to the entrance. Soldiers patrol the area early in the game."),
+    0x02: ("Open clearing with a distinctive tree. Accessible from Death "
+           "Mountain to the east and Lost Woods to the west."),
+    0x03: ("Rocky mountain path with falling boulders and narrow ledges. "
+           "Cave entrances along the way. South exit leads to foothills."),
+    0x05: ("High mountain terrain. Spiral Cave and Spectacle Rock "
+           "entrances nearby. Watch for falling rocks."),
+    0x07: ("The peak of Death Mountain. Tower of Hera entrance is here. "
+           "Warp tile available."),
+    0x0A: ("A prominent landmark on Death Mountain. Two rock formations "
+           "overlook Hyrule below. Mirror warp point."),
+    0x0F: ("Rushing waterfall at the northeast corner of the map. Zora "
+           "sells flippers here. Deep water blocks passage without flippers."),
+    0x10: ("Southern edge of the Lost Woods. A mushroom can be found here. "
+           "Path leads south to Kakariko Village."),
+    0x12: ("Small clearing with the Fortune Teller's hut. Pay rupees for "
+           "hints about your quest."),
+    0x14: ("Sacred grove deep in the Lost Woods. The Master Sword pedestal "
+           "awaits one who holds all three pendants."),
+    0x15: ("The north face of Hyrule Castle. Castle walls block passage. "
+           "Guards patrol the area."),
+    0x16: ("Eastern grounds of Hyrule Castle. Open field with scattered "
+           "bushes. Connects to Witch's Hut area to the east."),
+    0x17: ("Path near the Witch's Hut. Bring a mushroom to the witch for "
+           "Magic Powder. Potion shop nearby."),
+    0x18: ("A bustling village with many houses and shops. Friendly NPCs "
+           "offer information and items. Multiple building entrances."),
+    0x1A: ("A quiet clearing in the woods south of Kakariko. The Flute "
+           "Boy once played music here."),
+    0x1B: ("The castle entrance and courtyard. Guards are on high alert. "
+           "Secret passages exist in the garden bushes."),
+    0x1E: ("The entrance to the Eastern Palace. Stone building in the "
+           "eastern region. First dungeon of the quest."),
+    0x22: ("A safe haven north of the castle. The priest offers shelter. "
+           "Heal and save your progress here."),
+    0x25: ("Rows of tombstones. Some graves can be pushed to reveal "
+           "secrets. Ghosts may appear."),
+    0x28: ("Southern part of Kakariko Village. Library and more houses. "
+           "Connects to the main village to the north."),
+    0x29: ("The elder Sahasrahla's hideout. Seek his wisdom about the "
+           "pendants and the Master Sword."),
+    0x2A: ("Wide open field in the heart of Hyrule. Good landmark for "
+           "orientation. Paths lead in all directions."),
+    0x2B: ("Your home. A safe spot to rest. South of Hyrule Castle, "
+           "east of the swamp."),
+    0x2C: ("Open terrain between Link's House and the Eastern Palace. "
+           "Scattered enemies and bushes."),
+    0x2E: ("The area surrounding the Eastern Palace entrance. Stone "
+           "ruins and hedges line the path."),
+    0x30: ("Vast sandy desert in the southwest. Vultures circle overhead. "
+           "Desert Palace entrance is here. Book of Mudora needed."),
+    0x32: ("A green meadow south of the Haunted Grove. Peaceful area "
+           "with few enemies."),
+    0x33: ("The northern shore of Lake Hylia. Shallow water near the "
+           "edges. Islands visible to the south."),
+    0x34: ("A magical waterfall. Throw items into the fairy fountain "
+           "for upgrades."),
+    0x35: ("A large body of water. Swimming required for exploration. "
+           "Ice Rod cave accessible from the east shore."),
+    0x37: ("A small island in the middle of Lake Hylia. Accessible "
+           "by swimming or warping."),
+    0x3A: ("A stone dam controlling the water flow. A switch inside "
+           "can drain the water to open passages."),
+    0x3B: ("Rocky terrain near Lake Hylia. The Ice Rod cave entrance "
+           "is hidden among the rocks."),
+
+    # Dark World
+    0x40: ("Twisted dark forest. Multiple entrances lead underground "
+           "to Skull Woods dungeon. Trees look menacing."),
+    0x43: ("Dark World version of Death Mountain west side. Hostile "
+           "terrain with stronger enemies than the Light World."),
+    0x45: ("Dark Death Mountain east side. Turtle Rock dungeon entrance "
+           "is nearby. Requires Quake Medallion."),
+    0x47: ("Turtle Rock entrance area on Dark Death Mountain. The rock "
+           "formation resembles a giant turtle."),
+    0x4A: ("The base of Ganon's Tower atop Dark Death Mountain. All "
+           "seven crystals are needed to break the seal."),
+    0x58: ("Dark World version of Kakariko Village. Hostile inhabitants "
+           "have replaced the villagers. Thieves' Town dungeon below."),
+    0x5A: ("Dark World version of the Haunted Grove. A creature named "
+           "Stumpy stands where the Flute Boy was."),
+    0x5B: ("A massive pyramid in the center of the Dark World. Ganon "
+           "lurks within. A crack in the side leads to the final battle."),
+    0x5E: ("Dark World eastern region. The Palace of Darkness entrance "
+           "is here. First Dark World dungeon."),
+    0x62: ("Dark World mirror of the Sanctuary area. Hostile version "
+           "of the safe haven."),
+    0x68: ("Dark World version of Kakariko. Thieves' Town dungeon "
+           "entrance is disguised as a building."),
+    0x69: ("Dark World area with an archery mini-game. Test your aim "
+           "for rupee prizes."),
+    0x6A: ("Central Dark World field. Rough terrain with stronger "
+           "monsters roaming."),
+    0x6B: ("Dark World swamp region. Swamp Palace dungeon entrance "
+           "is here. Flooded terrain requires swimming."),
+    0x70: ("A dismal swamp in the Dark World southwest. Requires the "
+           "Ether Medallion to open the Misery Mire dungeon entrance."),
+    0x72: ("Dark World area with a digging mini-game. Pay rupees to "
+           "dig for buried treasures."),
+    0x73: ("Murky swamp waters in the Dark World. Dangerous terrain "
+           "with limited solid ground."),
+    0x75: ("Frozen Dark World lake. Ice Palace dungeon entrance is on "
+           "an island. Requires Flippers to reach."),
+    0x77: ("Dark World version of Lake Hylia. Darker, more dangerous "
+           "waters filled with enemies."),
+}
+
+
+# ─── Dungeon Room Mapping ────────────────────────────────────────────────────
+# Maps dungeon room IDs (from $7E00A0) to dungeon names.
+# Room IDs are assigned on a 16-wide grid in ALttP.
+# This mapping covers the major rooms; unknown rooms fall back to
+# "Unknown dungeon" in the UI.
+
+DUNGEON_ROOMS: dict[int, str] = {}
+
+_DUNGEON_ROOM_DATA: dict[str, list[int]] = {
+    "Hyrule Castle": [
+        0x01, 0x02, 0x11, 0x12, 0x21, 0x22, 0x32,
+        0x41, 0x50, 0x51, 0x52, 0x55, 0x60, 0x61,
+        0x62, 0x70, 0x71, 0x72, 0x80, 0x81, 0x82,
+    ],
+    "Eastern Palace": [
+        0x89, 0x98, 0x99, 0x9A, 0xA8, 0xA9, 0xAA,
+        0xB8, 0xB9, 0xBA, 0xC8, 0xC9, 0xD8, 0xD9, 0xDA,
+    ],
+    "Desert Palace": [
+        0x33, 0x43, 0x53, 0x63, 0x73, 0x83, 0x84, 0x85,
+    ],
+    "Tower of Hera": [
+        0x07, 0x17, 0x27, 0x77, 0xA7,
+    ],
+    "Castle Tower": [
+        0x20, 0x30, 0x40, 0xB0, 0xC0, 0xD0, 0xE0,
+    ],
+    "Palace of Darkness": [
+        0x09, 0x0A, 0x0B, 0x19, 0x1A, 0x1B, 0x2A, 0x2B,
+        0x3A, 0x3B, 0x4A, 0x4B, 0x5A, 0x5B, 0x6A, 0x6B,
+    ],
+    "Swamp Palace": [
+        0x06, 0x16, 0x26, 0x28, 0x34, 0x35, 0x36, 0x37,
+        0x38, 0x46, 0x66, 0x76,
+    ],
+    "Skull Woods": [
+        0x39, 0x49, 0x56, 0x57, 0x58, 0x59,
+        0x67, 0x68, 0x87, 0x88,
+    ],
+    "Thieves' Town": [
+        0x44, 0x45, 0x64, 0x65, 0xAB, 0xAC,
+        0xBB, 0xBC, 0xCB, 0xCC, 0xDB, 0xDC,
+    ],
+    "Ice Palace": [
+        0x0E, 0x1E, 0x1F, 0x2E, 0x3E, 0x3F, 0x4E, 0x5E, 0x5F,
+        0x6E, 0x7E, 0x7F, 0x8E, 0x9E, 0x9F, 0xAE, 0xBE, 0xBF,
+        0xCE, 0xDE,
+    ],
+    "Misery Mire": [
+        0x90, 0x91, 0x92, 0x93, 0xA0, 0xA1, 0xA2, 0xA3,
+        0xB1, 0xB2, 0xB3, 0xC1, 0xC2, 0xC3, 0xD1, 0xD2,
+    ],
+    "Turtle Rock": [
+        0x04, 0x13, 0x14, 0x15, 0x23, 0x24, 0x25,
+        0xB4, 0xB5, 0xB6, 0xC4, 0xC5, 0xC6, 0xD4, 0xD5, 0xD6,
+    ],
+    "Ganon's Tower": [
+        0x0C, 0x0D, 0x1C, 0x1D, 0x3C, 0x3D, 0x4C, 0x4D,
+        0x5C, 0x5D, 0x6C, 0x6D, 0x7C, 0x7D, 0x8C, 0x8D,
+        0x95, 0x96, 0x9C, 0x9D,
+    ],
+}
+
+for _dname, _rooms in _DUNGEON_ROOM_DATA.items():
+    for _rid in _rooms:
+        DUNGEON_ROOMS[_rid] = _dname
+
+
+DUNGEON_DESCRIPTIONS: dict[str, str] = {
+    "Hyrule Castle": (
+        "The fortified castle at the center of Hyrule. "
+        "Soldiers patrol the halls. Dark sewers lie below. "
+        "Princess Zelda is held captive in the basement."
+    ),
+    "Eastern Palace": (
+        "A grand stone palace in eastern Hyrule. "
+        "Home to the Pendant of Courage. "
+        "Watch for Armos statues that come alive and eyegore enemies. "
+        "The boss is the Armos Knights."
+    ),
+    "Desert Palace": (
+        "A sand-filled palace in the southwestern desert. "
+        "Home to the Pendant of Power. "
+        "Requires the Book of Mudora to enter. "
+        "Beware of shifting sands. The boss is Lanmolas."
+    ),
+    "Tower of Hera": (
+        "A tall tower on Death Mountain's summit. "
+        "Home to the Pendant of Wisdom. "
+        "Multiple floors connected by holes in the ground. "
+        "Moldorm, the boss, fights on a platform with no railing."
+    ),
+    "Castle Tower": (
+        "Agahnim's tower atop Hyrule Castle. "
+        "Climb through guarded floors to confront the wizard. "
+        "Requires the Master Sword to enter. "
+        "Reflect Agahnim's magic with your sword to defeat him."
+    ),
+    "Palace of Darkness": (
+        "The first Dark World dungeon, a massive fortress in the east. "
+        "Dark rooms require the Lamp. Maze-like passages with switches. "
+        "The boss is the Helmasaur King. Use the Hammer on its mask."
+    ),
+    "Swamp Palace": (
+        "A water-filled dungeon in the Dark World swamp. "
+        "Flooded rooms require swimming. Water levels change with switches. "
+        "The boss is Arrghus. Pull the puffballs off with the Hookshot."
+    ),
+    "Skull Woods": (
+        "A dungeon beneath the Dark World's twisted forest. "
+        "Multiple outdoor entrances lead to different sections. "
+        "Fire traps and moving floors. "
+        "The boss is Mothula. Watch for the moving floor and spikes."
+    ),
+    "Thieves' Town": (
+        "Hidden beneath a building in the Village of Outcasts. "
+        "Dark rooms and bombable walls hide secrets. "
+        "A mysterious maiden awaits rescue. "
+        "The boss is Blind the Thief. Light from windows is key."
+    ),
+    "Ice Palace": (
+        "A frozen dungeon on an island in the Dark World lake. "
+        "Slippery ice floors and falling ice hazards. "
+        "Requires the Fire Rod to melt ice blocks. "
+        "The boss is Kholdstare, encased in ice."
+    ),
+    "Misery Mire": (
+        "A dungeon in the Dark World's dismal swamp. "
+        "Requires the Ether Medallion to enter. "
+        "Flooded floors and Wizzrobes throughout. "
+        "The boss is Vitreous, a giant eye surrounded by smaller eyes."
+    ),
+    "Turtle Rock": (
+        "A dungeon inside a rock formation on Dark Death Mountain. "
+        "Requires the Quake Medallion to enter. "
+        "Lava pits and pipe mazes. Uses both Fire and Ice Rods. "
+        "The boss is Trinexx, a three-headed turtle."
+    ),
+    "Ganon's Tower": (
+        "The final dungeon atop Dark Death Mountain. "
+        "Requires all seven crystals to break the seal. "
+        "Combines puzzles and enemies from all previous dungeons. "
+        "Agahnim waits at the top, then the path to Ganon opens."
+    ),
+}
+
+
 # Boolean items: key -> display name
 BOOLEAN_ITEMS = {
     "hookshot": "Hookshot",
@@ -522,13 +782,32 @@ class GameState:
         return DIRECTION_NAMES.get(self.get("direction"), "unknown")
 
     @property
+    def dungeon_name(self) -> str:
+        """Name of the current dungeon based on room ID, or empty string."""
+        room = self.get("dungeon_room")
+        return DUNGEON_ROOMS.get(room, "")
+
+    @property
     def location_name(self) -> str:
         module = self.get("main_module")
         if module == 0x07:
             room = self.get("dungeon_room")
+            name = DUNGEON_ROOMS.get(room)
+            if name:
+                return f"{name}, room {room:#06x}"
             return f"Dungeon room {room:#06x}"
         screen = self.get("ow_screen")
         return OVERWORLD_NAMES.get(screen, f"Overworld {screen:#04x}")
+
+    @property
+    def area_description(self) -> str:
+        """Accessibility description of the current area."""
+        module = self.get("main_module")
+        if module == 0x07:
+            name = self.dungeon_name
+            return DUNGEON_DESCRIPTIONS.get(name, "")
+        screen = self.get("ow_screen")
+        return OVERWORLD_DESCRIPTIONS.get(screen, "")
 
     @property
     def world_name(self) -> str:
@@ -736,10 +1015,14 @@ class EventDetector:
         if (curr.get("dungeon_room") != prev.get("dungeon_room")
                 and curr.is_in_dungeon):
             room = curr.get("dungeon_room")
+            dungeon = curr.dungeon_name
+            if dungeon:
+                msg = f"{dungeon}, room {room:#06x}. Floor: {curr.get('floor')}."
+            else:
+                msg = f"Dungeon room {room:#06x}. Floor: {curr.get('floor')}."
             events.append(Event(
-                "ROOM_CHANGE", EventPriority.MEDIUM,
-                f"Entered dungeon room {room:#06x}. Floor: {curr.get('floor')}.",
-                {"room": room},
+                "ROOM_CHANGE", EventPriority.MEDIUM, msg,
+                {"room": room, "dungeon": dungeon},
             ))
 
         # Overworld screen change
@@ -747,9 +1030,12 @@ class EventDetector:
                 and curr.is_on_overworld):
             screen = curr.get("ow_screen")
             area = OVERWORLD_NAMES.get(screen, f"area {screen:#04x}")
+            desc = OVERWORLD_DESCRIPTIONS.get(screen, "")
+            msg = f"Entered {area}."
+            if desc:
+                msg += f" {desc}"
             events.append(Event(
-                "ROOM_CHANGE", EventPriority.MEDIUM,
-                f"Entered {area}.",
+                "ROOM_CHANGE", EventPriority.MEDIUM, msg,
                 {"screen": screen, "name": area},
             ))
 
@@ -762,10 +1048,14 @@ class EventDetector:
 
         # Dungeon enter / exit
         if prev_mod == 0x09 and curr_mod == 0x07:
+            dungeon = curr.dungeon_name or "a dungeon"
+            desc = DUNGEON_DESCRIPTIONS.get(curr.dungeon_name, "")
+            msg = f"Entered {dungeon}."
+            if desc:
+                msg += f" {desc}"
             events.append(Event(
-                "DUNGEON_ENTER_EXIT", EventPriority.MEDIUM,
-                "Entered a dungeon.",
-                {"entered": True},
+                "DUNGEON_ENTER_EXIT", EventPriority.MEDIUM, msg,
+                {"entered": True, "dungeon": dungeon},
             ))
         elif prev_mod == 0x07 and curr_mod == 0x09:
             events.append(Event(
@@ -1055,6 +1345,7 @@ _NO_STATE = "No game state available yet."
 
 COMMANDS: dict[str, str] = {
     "pos":      "Current position, room, and direction",
+    "look":     "Description of the current area",
     "health":   "Health, magic, and resources",
     "items":    "Equipment and inventory",
     "enemies":  "Nearby enemies and directions",
@@ -1073,6 +1364,19 @@ def handle_command(cmd: str, poller: MemoryPoller,
     if cmd == "pos":
         state = poller.get_state()
         _say(state.format_position() if state else _NO_STATE)
+        return True
+
+    if cmd == "look":
+        state = poller.get_state()
+        if not state:
+            _say(_NO_STATE)
+        else:
+            _say(state.location_name + ".")
+            desc = state.area_description
+            if desc:
+                _say(desc)
+            else:
+                _say("No description available for this area.")
         return True
 
     if cmd == "health":
