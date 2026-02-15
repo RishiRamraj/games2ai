@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional
 
+from rom_reader import RomData, load_rom
+
 
 # ─── Memory Address Table ────────────────────────────────────────────────────
 # Maps field names to (SNES A-bus address, byte_length) tuples.
@@ -763,6 +765,7 @@ class GameState:
     raw: dict[str, Optional[int]] = field(default_factory=dict)
     sprites: list[Sprite] = field(default_factory=list)
     timestamp: float = 0.0
+    rom_data: Optional[RomData] = field(default=None, repr=False)
 
     def get(self, key: str, default: int = 0) -> int:
         v = self.raw.get(key)
@@ -804,10 +807,35 @@ class GameState:
         """Accessibility description of the current area."""
         module = self.get("main_module")
         if module == 0x07:
+            # Dungeon: try ROM-based full description first
+            if self.rom_data:
+                room_id = self.get("dungeon_room")
+                room = self.rom_data.get_room(room_id)
+                if room and (room.sprites or room.doors or
+                             (room.header and room.header.tag1)):
+                    return room.to_full()
             name = self.dungeon_name
             return DUNGEON_DESCRIPTIONS.get(name, "")
+        # Overworld: static description + ROM sprite listing
         screen = self.get("ow_screen")
-        return OVERWORLD_DESCRIPTIONS.get(screen, "")
+        desc = OVERWORLD_DESCRIPTIONS.get(screen, "")
+        if self.rom_data:
+            sprite_text = self.rom_data.format_ow_sprites(screen)
+            if sprite_text:
+                desc = f"{desc} {sprite_text}" if desc else sprite_text
+        return desc
+
+    @property
+    def area_brief(self) -> str:
+        """Brief ROM-based description of the current dungeon room."""
+        if not self.rom_data or self.get("main_module") != 0x07:
+            return ""
+        room_id = self.get("dungeon_room")
+        room = self.rom_data.get_room(room_id)
+        if room and (room.sprites or room.doors or
+                     (room.header and room.header.tag1)):
+            return room.to_brief()
+        return ""
 
     @property
     def world_name(self) -> str:
@@ -970,8 +998,10 @@ _INVENTORY_KEYS = (
 class EventDetector:
     """Compares previous and current GameState to emit events."""
 
-    def __init__(self, dialog_messages: Optional[list[str]] = None):
+    def __init__(self, dialog_messages: Optional[list[str]] = None,
+                 rom_data: Optional[RomData] = None):
         self.dialog_messages = dialog_messages or []
+        self.rom_data = rom_data
 
     def detect(self, prev: GameState, curr: GameState) -> list[Event]:
         events: list[Event] = []
@@ -1020,6 +1050,12 @@ class EventDetector:
                 msg = f"{dungeon}, room {room:#06x}. Floor: {curr.get('floor')}."
             else:
                 msg = f"Dungeon room {room:#06x}. Floor: {curr.get('floor')}."
+            # Append ROM-based brief description
+            if self.rom_data:
+                room_data = self.rom_data.get_room(room)
+                if room_data and (room_data.sprites or room_data.doors or
+                                  (room_data.header and room_data.header.tag1)):
+                    msg += " " + room_data.to_brief()
             events.append(Event(
                 "ROOM_CHANGE", EventPriority.MEDIUM, msg,
                 {"room": room, "dungeon": dungeon},
@@ -1034,6 +1070,11 @@ class EventDetector:
             msg = f"Entered {area}."
             if desc:
                 msg += f" {desc}"
+            # Append ROM overworld sprite listing
+            if self.rom_data:
+                sprite_text = self.rom_data.format_ow_sprites(screen)
+                if sprite_text:
+                    msg += f" {sprite_text}"
             events.append(Event(
                 "ROOM_CHANGE", EventPriority.MEDIUM, msg,
                 {"screen": screen, "name": area},
@@ -1224,7 +1265,8 @@ class RetroArchClient:
             self._sock.close()
 
 
-def read_memory(ra: RetroArchClient) -> GameState:
+def read_memory(ra: RetroArchClient,
+                rom_data: Optional[RomData] = None) -> GameState:
     """Read all ALttP memory addresses into a GameState."""
     raw: dict[str, Optional[int]] = {}
     for name, (addr, length) in MEMORY_MAP.items():
@@ -1256,7 +1298,8 @@ def read_memory(ra: RetroArchClient) -> GameState:
                 y=y,
             ))
 
-    return GameState(raw=raw, sprites=sprites, timestamp=time.time())
+    return GameState(raw=raw, sprites=sprites, timestamp=time.time(),
+                     rom_data=rom_data)
 
 
 
@@ -1277,10 +1320,12 @@ class MemoryPoller:
     """Polls emulator memory at ~4 Hz, detects events, prints output."""
 
     def __init__(self, ra: RetroArchClient, poll_hz: float = 4.0,
-                 dialog_messages: Optional[list[str]] = None):
+                 dialog_messages: Optional[list[str]] = None,
+                 rom_data: Optional[RomData] = None):
         self.ra = ra
         self.poll_interval = 1.0 / poll_hz
-        self.detector = EventDetector(dialog_messages)
+        self.rom_data = rom_data
+        self.detector = EventDetector(dialog_messages, rom_data)
         self._state: Optional[GameState] = None
         self._state_lock = threading.Lock()
         self._running = False
@@ -1306,7 +1351,7 @@ class MemoryPoller:
 
         while self._running:
             try:
-                new_state = read_memory(self.ra)
+                new_state = read_memory(self.ra, self.rom_data)
 
                 # Skip if we didn't get valid data
                 if new_state.raw.get("main_module") is None:
@@ -1374,7 +1419,10 @@ def handle_command(cmd: str, poller: MemoryPoller,
             _say(state.location_name + ".")
             desc = state.area_description
             if desc:
-                _say(desc)
+                # ROM full descriptions are multi-line; print each line
+                for line in desc.split("\n"):
+                    if line.strip():
+                        _say(line.strip())
             else:
                 _say("No description available for this area.")
         return True
@@ -1442,9 +1490,21 @@ Examples:
                         help="RetroArch UDP port (default: 55355)")
     parser.add_argument("--poll-hz", type=float, default=4.0,
                         help="Memory poll rate in Hz (default: 4)")
+    parser.add_argument("--rom", default=None,
+                        help="Path to ALttP ROM file (.sfc) for geometric room descriptions")
     parser.add_argument("--text", default=None,
                         help="Path to ALttP text dump file (default: text.txt next to bridge.py)")
     args = parser.parse_args()
+
+    # Load ROM data if provided
+    rom_data: Optional[RomData] = None
+    if args.rom:
+        _say(f"Loading ROM: {args.rom}")
+        rom_data = load_rom(args.rom)
+        if rom_data:
+            _say("ROM data loaded. Room descriptions will use ROM geometry.")
+        else:
+            _say("Failed to load ROM. Falling back to static descriptions.")
 
     # Load dialog text dump
     text_path = args.text or os.path.join(
@@ -1482,7 +1542,8 @@ Examples:
 
     # Start poller
     poller = MemoryPoller(ra, poll_hz=args.poll_hz,
-                          dialog_messages=dialog_messages)
+                          dialog_messages=dialog_messages,
+                          rom_data=rom_data)
     poller.start()
 
     _say("ALttP Accessibility Bridge started. Type help for commands.")
