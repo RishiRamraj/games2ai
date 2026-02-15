@@ -795,6 +795,143 @@ def _direction_label(dx: int, dy: int) -> str:
 _LINK_BODY_OFFSET_X = 8    # half of 16px sprite width
 _LINK_BODY_OFFSET_Y = 8    # body centre, below the head
 
+
+@dataclass
+class TrackedObject:
+    """A game object tracked across frames with optional velocity."""
+    key: str                    # stable ID
+    world_x: int                # absolute pixel position
+    world_y: int
+    type_id: int                # sprite/object type identifier
+    name: str                   # human-readable name
+    category: str               # sprite category or "static"
+    is_dynamic: bool            # True for live WRAM sprites
+    last_seen: float            # timestamp when last observed
+    zone: Optional[str] = None  # "approach", "nearby", "facing", or None
+    vx: float = 0.0             # velocity in pixels/sec (EMA-smoothed)
+    vy: float = 0.0
+    _prev_x: int = 0            # previous frame position (internal)
+    _prev_y: int = 0
+    _prev_time: float = 0.0     # previous frame timestamp
+
+
+class ObjectTracker:
+    """Frame-to-frame object tracking with velocity computation."""
+
+    _VELOCITY_ALPHA = 0.3   # EMA smoothing factor
+    _STALE_TIMEOUT = 2.0    # seconds before removing unseen dynamic objects
+    _SPEED_THRESHOLD = 20.0 # px/sec — below this, velocity is jitter
+
+    def __init__(self) -> None:
+        self._objects: dict[str, TrackedObject] = {}
+
+    def clear(self) -> None:
+        """Reset all tracking (call on room/screen transition)."""
+        self._objects.clear()
+
+    def get(self, key: str) -> Optional[TrackedObject]:
+        return self._objects.get(key)
+
+    def all_objects(self) -> list[TrackedObject]:
+        return list(self._objects.values())
+
+    def active_dynamic(self) -> list[TrackedObject]:
+        return [o for o in self._objects.values() if o.is_dynamic]
+
+    def update_static(self, features: list[tuple[str, int, int, str]],
+                      now: float) -> None:
+        """Update static feature tracking from _get_features() output."""
+        seen_keys: set[str] = set()
+        for key, px, py, desc in features:
+            seen_keys.add(key)
+            obj = self._objects.get(key)
+            if obj is None:
+                self._objects[key] = TrackedObject(
+                    key=key, world_x=px, world_y=py, type_id=0,
+                    name=desc, category="static", is_dynamic=False,
+                    last_seen=now,
+                )
+            else:
+                obj.world_x = px
+                obj.world_y = py
+                obj.last_seen = now
+        # Remove static features no longer in the list
+        stale = [k for k, o in self._objects.items()
+                 if not o.is_dynamic and k not in seen_keys]
+        for k in stale:
+            del self._objects[k]
+
+    def update_sprites(self, sprites: list[Sprite], now: float) -> None:
+        """Update dynamic sprite tracking from GameState.sprites."""
+        seen_keys: set[str] = set()
+        for s in sprites:
+            if not s.is_active:
+                continue
+            if s.category == SpriteCategory.UNKNOWN:
+                continue
+            key = f"sprite:{s.index}"
+            seen_keys.add(key)
+            obj = self._objects.get(key)
+            if obj is not None and obj.is_dynamic:
+                # Slot reuse detection: type changed -> new entity
+                if obj.type_id != s.type_id:
+                    obj = None
+            if obj is None:
+                self._objects[key] = TrackedObject(
+                    key=key, world_x=s.x, world_y=s.y,
+                    type_id=s.type_id, name=s.name,
+                    category=s.category, is_dynamic=True,
+                    last_seen=now,
+                    _prev_x=s.x, _prev_y=s.y, _prev_time=now,
+                )
+            else:
+                # Compute velocity via EMA
+                dt = now - obj._prev_time
+                if dt > 0.001:
+                    raw_vx = (s.x - obj._prev_x) / dt
+                    raw_vy = (s.y - obj._prev_y) / dt
+                    a = self._VELOCITY_ALPHA
+                    obj.vx = a * raw_vx + (1 - a) * obj.vx
+                    obj.vy = a * raw_vy + (1 - a) * obj.vy
+                obj._prev_x = obj.world_x
+                obj._prev_y = obj.world_y
+                obj._prev_time = now
+                obj.world_x = s.x
+                obj.world_y = s.y
+                obj.type_id = s.type_id
+                obj.name = s.name
+                obj.category = s.category
+                obj.last_seen = now
+        # Mark unseen dynamic sprites (don't remove yet — prune_stale handles that)
+
+    def prune_stale(self, now: float) -> None:
+        """Remove dynamic objects not seen for _STALE_TIMEOUT seconds."""
+        stale = [k for k, o in self._objects.items()
+                 if o.is_dynamic and (now - o.last_seen) > self._STALE_TIMEOUT]
+        for k in stale:
+            del self._objects[k]
+
+    def approaching_link(self, obj: TrackedObject,
+                         link_x: int, link_y: int) -> Optional[str]:
+        """Check if a dynamic sprite is moving toward Link.
+
+        Returns a direction string (e.g. "from the east") if the sprite's
+        velocity vector points toward Link with speed > threshold, else None.
+        """
+        speed = (obj.vx ** 2 + obj.vy ** 2) ** 0.5
+        if speed < self._SPEED_THRESHOLD:
+            return None
+        # Vector from sprite to Link
+        to_link_x = link_x - obj.world_x
+        to_link_y = link_y - obj.world_y
+        # Dot product: positive means moving toward Link
+        dot = obj.vx * to_link_x + obj.vy * to_link_y
+        if dot <= 0:
+            return None
+        # Direction the sprite is coming FROM (opposite of velocity)
+        return _direction_label(-int(obj.vx), -int(obj.vy))
+
+
 # Pixel offsets from Link's position to the tile ahead, indexed by direction.
 # Link's hitbox is ~16px; we probe 16px ahead of his center.
 _FACING_OFFSETS: dict[int, tuple[int, int]] = {
@@ -1633,16 +1770,66 @@ class ProximityTracker:
         self._ra = ra
         self._current_room: int = -1
         self._current_ow_screen: int = -1
-        self._announced: dict[str, str] = {}  # feature key -> zone
+        self._tracker = ObjectTracker()
         self._doorway_features: list[tuple[str, int, int, str]] = []
         self._last_cone: str = ""  # last announced cone description
         self._last_direction: int = -1  # track Link's facing direction
+
+    def _zone_transition(self, obj: TrackedObject, dist: float,
+                         direction: str, link_dir_name: Optional[str],
+                         is_facing: bool) -> Optional[Event]:
+        """Evaluate zone state machine for a tracked object.
+
+        Returns an Event if a zone boundary was crossed, else None.
+        Updates obj.zone in place.
+        """
+        prev_zone = obj.zone
+        diag = {"key": obj.key, "dist": int(dist),
+                "tile": (obj.world_x // 16, obj.world_y // 16)}
+
+        event: Optional[Event] = None
+
+        if is_facing and prev_zone != "facing":
+            msg = f"Facing {obj.name}."
+            event = Event("FACING", EventPriority.MEDIUM, msg, diag)
+            obj.zone = "facing"
+        elif dist <= self.NEARBY_DIST and prev_zone not in ("nearby", "facing"):
+            msg = f"{obj.name} nearby to the {direction}."
+            event = Event("PROXIMITY", EventPriority.MEDIUM, msg, diag)
+            obj.zone = "nearby"
+        elif dist <= self.APPROACH_DIST and prev_zone is None:
+            msg = f"Approaching {obj.name} to the {direction}."
+            # Add velocity info for dynamic sprites
+            if obj.is_dynamic:
+                speed = (obj.vx ** 2 + obj.vy ** 2) ** 0.5
+                if speed > ObjectTracker._SPEED_THRESHOLD:
+                    from_dir = _direction_label(-int(obj.vx), -int(obj.vy))
+                    msg = (f"Approaching {obj.name} to the {direction}, "
+                           f"moving from the {from_dir}.")
+            event = Event("PROXIMITY", EventPriority.LOW, msg, diag)
+            obj.zone = "approach"
+
+        # Reset facing when Link turns away
+        if prev_zone == "facing" and not is_facing:
+            if dist <= self.NEARBY_DIST:
+                obj.zone = "nearby"
+            elif dist <= self.APPROACH_DIST:
+                obj.zone = "approach"
+            else:
+                obj.zone = None
+
+        # Reset zone when object leaves approach range
+        if dist > self.APPROACH_DIST and prev_zone is not None:
+            obj.zone = None
+
+        return event
 
     def check(self, state: GameState) -> list[Event]:
         """Return proximity events for the current poll cycle."""
         if not state.rom_data:
             return []
 
+        now = state.timestamp
         # Use Link's body centre for distance to tile-based features
         link_x = state.get("link_x") + _LINK_BODY_OFFSET_X
         link_y = state.get("link_y") + _LINK_BODY_OFFSET_Y
@@ -1652,7 +1839,7 @@ class ProximityTracker:
             room_id = state.get("dungeon_room")
             if room_id != self._current_room:
                 self._current_room = room_id
-                self._announced.clear()
+                self._tracker.clear()
                 # Scan WRAM tilemap for implicit doorway tiles
                 if self._ra:
                     self._doorway_features = self._scan_doorways(
@@ -1665,61 +1852,34 @@ class ProximityTracker:
             ow_screen = state.ow_screen_from_coords
             if ow_screen is not None and ow_screen != self._current_ow_screen:
                 self._current_ow_screen = ow_screen
-                self._announced.clear()
+                self._tracker.clear()
             if ow_screen is not None:
                 features = self._get_ow_features(state.rom_data, ow_screen)
 
-        if not features:
-            return []
-        events: list[Event] = []
+        # Update tracker with static features and dynamic sprites
+        self._tracker.update_static(features, now)
+        self._tracker.update_sprites(state.sprites, now)
+        self._tracker.prune_stale(now)
 
+        events: list[Event] = []
         link_dir_name = DIRECTION_NAMES.get(state.get("direction"))
 
-        for key, px, py, desc in features:
-            dx = px - link_x
-            dy = py - link_y
+        # Process all tracked objects (static + dynamic) through zone state machine
+        for obj in self._tracker.all_objects():
+            dx = obj.world_x - link_x
+            dy = obj.world_y - link_y
             dist = (dx * dx + dy * dy) ** 0.5
             direction = _direction_label(dx, dy)
 
-            prev_zone = self._announced.get(key)
-            diag = {"key": key, "dist": int(dist), "tile": (px // 16, py // 16)}
-
-            # Facing: within nearby range and Link faces toward the feature
             is_facing = (dist <= self.NEARBY_DIST
                          and link_dir_name
                          and (direction == link_dir_name
                               or direction == "here"))
 
-            if is_facing and prev_zone != "facing":
-                events.append(Event(
-                    "FACING", EventPriority.MEDIUM,
-                    f"Facing {desc}.",
-                    diag,
-                ))
-                self._announced[key] = "facing"
-            elif dist <= self.NEARBY_DIST and prev_zone not in ("nearby", "facing"):
-                events.append(Event(
-                    "PROXIMITY", EventPriority.MEDIUM,
-                    f"{desc} nearby to the {direction}.",
-                    diag,
-                ))
-                self._announced[key] = "nearby"
-            elif dist <= self.APPROACH_DIST and prev_zone is None:
-                events.append(Event(
-                    "PROXIMITY", EventPriority.LOW,
-                    f"Approaching {desc} to the {direction}.",
-                    diag,
-                ))
-                self._announced[key] = "approach"
-
-            # Reset facing when Link turns away, allowing re-announcement
-            if prev_zone == "facing" and not is_facing:
-                if dist <= self.NEARBY_DIST:
-                    self._announced[key] = "nearby"
-                elif dist <= self.APPROACH_DIST:
-                    self._announced[key] = "approach"
-                else:
-                    self._announced.pop(key, None)
+            event = self._zone_transition(obj, dist, direction,
+                                          link_dir_name, is_facing)
+            if event:
+                events.append(event)
 
         # Reset cone cache when Link turns (direction change = new scan)
         direction = state.get("direction")
@@ -1757,10 +1917,9 @@ class ProximityTracker:
             if ow_screen is not None:
                 features = self._get_ow_features(state.rom_data, ow_screen)
 
-        if not features:
-            return []
         results: list[tuple[float, str]] = []
 
+        # Static features
         for _key, px, py, desc in features:
             dx = px - link_x
             dy = py - link_y
@@ -1769,6 +1928,22 @@ class ProximityTracker:
                 direction = _direction_label(dx, dy)
                 results.append((dist, f"{desc} to the {direction}, "
                                       f"{int(dist)} pixels away."))
+
+        # Dynamic sprites from tracker
+        for obj in self._tracker.active_dynamic():
+            dx = obj.world_x - link_x
+            dy = obj.world_y - link_y
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist <= self.APPROACH_DIST:
+                direction = _direction_label(dx, dy)
+                entry = (f"{obj.name} to the {direction}, "
+                         f"{int(dist)} pixels away")
+                speed = (obj.vx ** 2 + obj.vy ** 2) ** 0.5
+                if speed > ObjectTracker._SPEED_THRESHOLD:
+                    move_dir = _direction_label(int(obj.vx), int(obj.vy))
+                    entry += f", moving {move_dir}"
+                entry += "."
+                results.append((dist, entry))
 
         results.sort(key=lambda r: r[0])
         return [r[1] for r in results]
