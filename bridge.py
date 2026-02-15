@@ -790,6 +790,11 @@ def _direction_label(dx: int, dy: int) -> str:
 
 # ─── Game State ───────────────────────────────────────────────────────────────
 
+# Link's sprite origin ($7E:0020/0022) is the top-left corner.
+# His visual centre (body, not head) is offset from that origin.
+_LINK_BODY_OFFSET_X = 8    # half of 16px sprite width
+_LINK_BODY_OFFSET_Y = 8    # body centre, below the head
+
 # Pixel offsets from Link's position to the tile ahead, indexed by direction.
 # Link's hitbox is ~16px; we probe 16px ahead of his center.
 _FACING_OFFSETS: dict[int, tuple[int, int]] = {
@@ -1171,16 +1176,7 @@ class EventDetector:
                 and curr.is_in_dungeon):
             room = curr.get("dungeon_room")
             dungeon = curr.dungeon_name
-            if dungeon:
-                msg = f"{dungeon}, room {room:#06x}. Floor: {curr.get('floor')}."
-            else:
-                msg = f"Dungeon room {room:#06x}. Floor: {curr.get('floor')}."
-            # Append ROM-based brief description
-            if self.rom_data:
-                room_data = self.rom_data.get_room(room)
-                if room_data and (room_data.sprites or room_data.doors or
-                                  (room_data.header and room_data.header.tag1)):
-                    msg += " " + room_data.to_brief()
+            msg = dungeon if dungeon else f"Room {room:#06x}"
             events.append(Event(
                 "ROOM_CHANGE", EventPriority.MEDIUM, msg,
                 {"room": room, "dungeon": dungeon},
@@ -1193,24 +1189,12 @@ class EventDetector:
         prev_ow = prev.ow_screen_from_coords
         if curr_ow is not None and curr_ow != prev_ow:
             screen = curr_ow
-            # Fall back to $008A area ID for names/descriptions, since
-            # OVERWORLD_NAMES may be keyed by area rather than sub-screen.
             area_id = curr.get("ow_screen")
             area = (OVERWORLD_NAMES.get(screen)
                     or OVERWORLD_NAMES.get(area_id)
-                    or f"area {screen:#04x}")
-            desc = (OVERWORLD_DESCRIPTIONS.get(screen)
-                    or OVERWORLD_DESCRIPTIONS.get(area_id, ""))
-            msg = f"Entered {area}."
-            if desc:
-                msg += f" {desc}"
-            # Append ROM overworld sprite listing
-            if self.rom_data:
-                sprite_text = self.rom_data.format_ow_sprites(screen)
-                if sprite_text:
-                    msg += f" {sprite_text}"
+                    or f"Area {screen:#04x}")
             events.append(Event(
-                "ROOM_CHANGE", EventPriority.MEDIUM, msg,
+                "ROOM_CHANGE", EventPriority.MEDIUM, area,
                 {"screen": screen, "name": area},
             ))
 
@@ -1600,20 +1584,53 @@ class ProximityTracker:
     # Doorway tile attribute values (from zelda3 tile_detect.c TileHandlerIndoor_22)
     _DOORWAY_TILES = frozenset(range(0x30, 0x38))
 
+    # 45° cone tile offsets per direction, grouped by distance (1-4 tiles).
+    # Each entry is (dx, dy) in 8-px tile units relative to Link's tile.
+    _CONE_OFFSETS: dict[int, list[list[tuple[int, int]]]] = {
+        0: [  # north (-y)
+            [(0, -1)],
+            [(-1, -2), (0, -2), (1, -2)],
+            [(-1, -3), (0, -3), (1, -3)],
+            [(-2, -4), (-1, -4), (0, -4), (1, -4), (2, -4)],
+        ],
+        2: [  # south (+y)
+            [(0, 1)],
+            [(-1, 2), (0, 2), (1, 2)],
+            [(-1, 3), (0, 3), (1, 3)],
+            [(-2, 4), (-1, 4), (0, 4), (1, 4), (2, 4)],
+        ],
+        4: [  # west (-x)
+            [(-1, 0)],
+            [(-2, -1), (-2, 0), (-2, 1)],
+            [(-3, -1), (-3, 0), (-3, 1)],
+            [(-4, -2), (-4, -1), (-4, 0), (-4, 1), (-4, 2)],
+        ],
+        6: [  # east (+x)
+            [(1, 0)],
+            [(2, -1), (2, 0), (2, 1)],
+            [(3, -1), (3, 0), (3, 1)],
+            [(4, -2), (4, -1), (4, 0), (4, 1), (4, 2)],
+        ],
+    }
+
     def __init__(self, ra: Optional['RetroArchClient'] = None) -> None:
         self._ra = ra
         self._current_room: int = -1
         self._current_ow_screen: int = -1
         self._announced: dict[str, str] = {}  # feature key -> zone
         self._doorway_features: list[tuple[str, int, int, str]] = []
+        self._last_cone: str = ""  # last announced cone description
+        self._last_direction: int = -1  # track Link's facing direction
+        self._last_enemies: list[tuple[int, int]] = []  # (slot, type_id) for dedup
 
     def check(self, state: GameState) -> list[Event]:
         """Return proximity events for the current poll cycle."""
         if not state.rom_data:
             return []
 
-        link_x = state.get("link_x")
-        link_y = state.get("link_y")
+        # Use Link's body centre for distance to tile-based features
+        link_x = state.get("link_x") + _LINK_BODY_OFFSET_X
+        link_y = state.get("link_y") + _LINK_BODY_OFFSET_Y
         features: list[tuple[str, int, int, str]] = []
 
         if state.is_in_dungeon:
@@ -1689,6 +1706,23 @@ class ProximityTracker:
                 else:
                     self._announced.pop(key, None)
 
+        # Reset cone cache when Link turns (direction change = new scan)
+        direction = state.get("direction")
+        if direction != self._last_direction:
+            self._last_direction = direction
+            self._last_cone = ""
+
+        # Tile-cone scan: describe the closest interesting static tile in a
+        # 45° cone 4 tiles ahead of Link's facing direction.
+        cone_msg = self._scan_cone(state)
+        if cone_msg and cone_msg != self._last_cone:
+            events.append(Event("CONE_TILE", EventPriority.LOW, cone_msg))
+            self._last_cone = cone_msg
+
+        # Moving object proximity: report enemies/projectiles closest to Link.
+        enemy_events = self._scan_enemies(state)
+        events.extend(enemy_events)
+
         return events
 
     def scan(self, state: GameState) -> list[str]:
@@ -1696,8 +1730,9 @@ class ProximityTracker:
         if not state.rom_data:
             return []
 
-        link_x = state.get("link_x")
-        link_y = state.get("link_y")
+        # Use Link's body centre for distance to tile-based features
+        link_x = state.get("link_x") + _LINK_BODY_OFFSET_X
+        link_y = state.get("link_y") + _LINK_BODY_OFFSET_Y
         features: list[tuple[str, int, int, str]] = []
 
         if state.is_in_dungeon:
@@ -1726,6 +1761,127 @@ class ProximityTracker:
 
         results.sort(key=lambda r: r[0])
         return [r[1] for r in results]
+
+    def _scan_cone(self, state: GameState) -> str:
+        """Scan tiles in a 45° cone ahead of Link and return a short
+        description of the closest interesting tile, or empty string."""
+        from rom_reader import TILE_TYPE_NAMES
+
+        if not self._ra:
+            return ""
+        direction = state.get("direction")
+        cone = self._CONE_OFFSETS.get(direction)
+        if cone is None:
+            return ""
+
+        link_x = state.get("link_x")
+        link_y = state.get("link_y")
+        if not link_x or not link_y:
+            return ""
+        if state.get("main_module") not in (0x07, 0x09):
+            return ""
+
+        indoors = state.get("indoors")
+
+        # Link's tile position (8-px grid)
+        ltx = (link_x + 8) >> 3   # centre of hitbox
+        lty = (link_y + 12) >> 3
+
+        for ring in cone:
+            for dx, dy in ring:
+                tx = ltx + dx
+                ty = lty + dy
+                attr = self._read_tile_attr(state, tx, ty)
+                if attr < 0:
+                    continue
+                if indoors and attr in GameState._INDOOR_WALL_TILES:
+                    name = "wall"
+                else:
+                    name = TILE_TYPE_NAMES.get(attr)
+                if name:
+                    # Describe position relative to centre of cone
+                    side = self._cone_side(direction, dx, dy)
+                    tiles = max(abs(dx), abs(dy))
+                    if side:
+                        return f"{name} {tiles} ahead, {side}."
+                    return f"{name} {tiles} ahead."
+        return ""
+
+    def _scan_enemies(self, state: GameState) -> list[Event]:
+        """Report enemies and projectiles near Link, closest first.
+        Only announces when the set of nearby enemies changes."""
+        link_x = state.get("link_x")
+        link_y = state.get("link_y")
+        if not link_x or not link_y:
+            return []
+
+        nearby: list[tuple[int, int, int, str, str]] = []  # (dist, slot, type, name, dir)
+        for s in state.sprites:
+            if not s.is_active or not s.is_enemy:
+                continue
+            dx = s.x - link_x
+            dy = s.y - link_y
+            dist = int((dx * dx + dy * dy) ** 0.5)
+            if dist <= ENEMY_DETECT_RADIUS:
+                direction = _direction_label(dx, dy)
+                nearby.append((dist, s.index, s.type_id, s.name, direction))
+        nearby.sort()  # closest first
+
+        curr_set = [(slot, tid) for _, slot, tid, _, _ in nearby]
+        if curr_set == self._last_enemies:
+            return []
+        self._last_enemies = curr_set
+
+        events: list[Event] = []
+        for dist, slot, tid, name, direction in nearby:
+            events.append(Event(
+                "ENEMY_PROXIMITY", EventPriority.HIGH,
+                f"{name} {direction}, {dist} away.",
+            ))
+        return events
+
+    @staticmethod
+    def _cone_side(direction: int, dx: int, dy: int) -> str:
+        """Return 'left'/'right'/'' for an offset relative to a direction."""
+        if direction == 0:    # north: +x is right
+            return "right" if dx > 0 else ("left" if dx < 0 else "")
+        if direction == 2:    # south: -x is right
+            return "right" if dx < 0 else ("left" if dx > 0 else "")
+        if direction == 4:    # west: -y is right
+            return "right" if dy < 0 else ("left" if dy > 0 else "")
+        if direction == 6:    # east: +y is right
+            return "right" if dy > 0 else ("left" if dy < 0 else "")
+        return ""
+
+    def _read_tile_attr(self, state: GameState, tx: int, ty: int) -> int:
+        """Read a single tile attribute at tile coords (tx, ty).
+        Returns -1 on failure."""
+        module = state.get("main_module")
+        if module == 0x07:
+            # Dungeon: read from WRAM attribute table
+            ctx = tx & 63
+            cty = (ty * 8) & 0x1F8  # convert tile row to byte offset
+            off = cty * 8 + ctx + (0x1000 if state.get("lower_level", 0) else 0)
+            data = self._ra.read_core_memory(_DUNG_TILEATTR_ADDR + off, 1)
+            return data[0] if data else -1
+        elif module == 0x09 and state.rom_data:
+            # Overworld: map16 lookup via ROM tables
+            px = tx * 8
+            py = ty * 8
+            base_y = state.get("ow_offset_base_y", 0)
+            mask_y = state.get("ow_offset_mask_y", 0)
+            base_x = state.get("ow_offset_base_x", 0)
+            mask_x = state.get("ow_offset_mask_x", 0)
+            t = ((py - base_y) & mask_y) * 8
+            t |= ((tx - base_x) & mask_x)
+            ow_off = t >> 1
+            tile_data = self._ra.read_core_memory(
+                _OW_TILEATTR_ADDR + ow_off * 2, 2)
+            if tile_data:
+                map16_idx = int.from_bytes(tile_data, "little")
+                return state.rom_data.ow_tile_attr(map16_idx, tx, py)
+            return -1
+        return -1
 
     def _get_features(self, room: 'RoomData',
                       link_x: int = 0, link_y: int = 0,
@@ -1859,6 +2015,210 @@ class ProximityTracker:
         return features
 
 
+# ─── ASCII Map Renderer ──────────────────────────────────────────────────────
+
+class MapRenderer:
+    """Renders a live ASCII map of the area around Link in the terminal."""
+
+    # Viewport size in 8px tiles (matches SNES visible screen 256x192)
+    VP_W = 32
+    VP_H = 24
+
+    # Tile attribute byte -> ASCII character
+    TILE_CHARS: dict[int, str] = {
+        0x00: ' ',
+        # Walls
+        0x01: '#', 0x02: '#', 0x03: '#', 0x26: '#', 0x43: '#',
+        # Indoor wall tiles (0x04 is grass outdoors, wall indoors)
+        0x0B: '#', 0x6C: '#', 0x6D: '#', 0x6E: '#', 0x6F: '#',
+        # Water
+        0x08: '~', 0x09: '~',
+        # Pit
+        0x20: 'O',
+        # Spikes / hazards
+        0x0D: 'X',
+        # Ice
+        0x0E: '=', 0x0F: '=',
+        # Stairs
+        0x1D: '>', 0x1E: '>', 0x1F: '>', 0x22: '>',
+        # Ledges
+        0x1C: '_', 0x28: '_', 0x29: '_', 0x2A: '_', 0x2B: '_',
+        # Chests
+        0x58: '*', 0x59: '*', 0x5A: '*', 0x5B: '*', 0x5C: '*', 0x5D: '*',
+        # Doors / doorways
+        0x30: '+', 0x31: '+', 0x32: '+', 0x33: '+',
+        0x34: '+', 0x35: '+', 0x36: '+', 0x37: '+',
+        # Bushes
+        0x50: 'B', 0x51: 'B',
+        # Rocks
+        0x52: 'R', 0x53: 'R',
+        # Pushable blocks
+        **{i: 'P' for i in range(0x70, 0x80)},
+        # Thick grass
+        0x04: ',', 0x40: ',',
+        # Hookshot target
+        0x27: 'H',
+        # Warp tile
+        0x4B: 'W',
+        # Pots
+        0x54: 'R', 0x55: 'R', 0x56: 'R',
+    }
+
+    # Link direction -> character
+    LINK_CHARS: dict[int, str] = {0: '^', 2: 'v', 4: '<', 6: '>'}
+
+    def __init__(self) -> None:
+        self._frame_count = 0
+
+    def render(self, state: GameState, ra: RetroArchClient,
+               rom_data: Optional[RomData] = None,
+               events: Optional[list[Event]] = None) -> None:
+        """Render one frame of the ASCII map to the terminal."""
+        module = state.get("main_module")
+        link_x = state.get("link_x")
+        link_y = state.get("link_y")
+        indoors = state.get("indoors")
+
+        if module not in (0x07, 0x09) or not link_x or not link_y:
+            # Not in gameplay — show a placeholder
+            print(f"\033[HWaiting for gameplay... (module={module:#04x})\033[K\033[J",
+                  end="", flush=True)
+            return
+
+        # Build the tile grid
+        grid = [['.' for _ in range(self.VP_W)] for _ in range(self.VP_H)]
+
+        # Centre viewport on Link's body (not sprite origin)
+        body_x = link_x + _LINK_BODY_OFFSET_X
+        body_y = link_y + _LINK_BODY_OFFSET_Y
+        vp_px = body_x - (self.VP_W // 2) * 8
+        vp_py = body_y - (self.VP_H // 2) * 8
+
+        if module == 0x07:
+            self._fill_dungeon(grid, ra, state, vp_px, vp_py, indoors)
+        elif module == 0x09 and rom_data:
+            self._fill_overworld(grid, ra, state, rom_data, vp_px, vp_py)
+
+        # Overlay sprites (their coords are also sprite-origin, so apply
+        # the same body offset for consistent placement)
+        for s in state.sprites:
+            if not s.is_active:
+                continue
+            sx = (s.x + _LINK_BODY_OFFSET_X - vp_px) // 8
+            sy = (s.y + _LINK_BODY_OFFSET_Y - vp_py) // 8
+            if 0 <= sx < self.VP_W and 0 <= sy < self.VP_H:
+                if s.is_enemy:
+                    grid[sy][sx] = 'E'
+                elif s.type_id in ITEM_DROP_IDS:
+                    grid[sy][sx] = 'I'
+
+        # Overlay Link (two tiles tall, centred on body)
+        lx = (body_x - vp_px) // 8
+        ly = (body_y - vp_py) // 8
+        direction = state.get("direction")
+        link_ch = self.LINK_CHARS.get(direction, '@')
+        if 0 <= lx < self.VP_W and 0 <= ly < self.VP_H:
+            grid[ly][lx] = link_ch
+        if 0 <= lx < self.VP_W and 0 <= ly + 1 < self.VP_H:
+            grid[ly + 1][lx] = link_ch
+
+        # Render to terminal — use \033[K (clear to EOL) on every line
+        # and \033[J (clear to end of screen) after the last line so
+        # shorter frames don't leave ghost characters from previous ones.
+        self._frame_count += 1
+        eol = "\033[K"
+        lines: list[str] = []
+        for row in grid:
+            lines.append(''.join(ch * 2 for ch in row) + eol)
+        # Status line
+        lines.append(eol)
+        room_info = state.location_name
+        hp_str = state.format_health()
+        lines.append(
+            f"Pos: ({link_x},{link_y})  "
+            f"Dir: {state.direction_name}  "
+            f"HP: {hp_str}  "
+            f"Loc: {room_info}" + eol
+        )
+        # Show recent events if any
+        if events:
+            recent = [e.message for e in events[:3]]
+            lines.append("  ".join(recent) + eol)
+        else:
+            lines.append(eol)
+        # Cursor home, draw frame, then clear everything below
+        print("\033[H" + '\n'.join(lines) + "\033[J", end="", flush=True)
+
+    def _fill_dungeon(self, grid: list[list[str]],
+                      ra: RetroArchClient, state: GameState,
+                      vp_px: int, vp_py: int, indoors: int) -> None:
+        """Fill the grid with dungeon tile attributes via bulk WRAM read."""
+        lower = state.get("lower_level", 0)
+        base = _DUNG_TILEATTR_ADDR + (0x1000 if lower else 0)
+        data = ra.read_core_memory(base, 4096)
+        if not data or len(data) < 4096:
+            return
+
+        indoor_walls = GameState._INDOOR_WALL_TILES
+
+        for gy in range(self.VP_H):
+            for gx in range(self.VP_W):
+                px = vp_px + gx * 8
+                py = vp_py + gy * 8
+                # Convert to tile coords in the 64x64 dungeon grid
+                tx = (px >> 3) & 63
+                ty = (py >> 3) & 63
+                off = ty * 64 + tx
+                if 0 <= off < 4096:
+                    attr = data[off]
+                    if indoors and attr in indoor_walls:
+                        grid[gy][gx] = '#'
+                    else:
+                        grid[gy][gx] = self._tile_char(attr, indoors)
+
+    def _fill_overworld(self, grid: list[list[str]],
+                        ra: RetroArchClient, state: GameState,
+                        rom_data: RomData, vp_px: int, vp_py: int) -> None:
+        """Fill the grid with overworld tile attributes via bulk WRAM read."""
+        base_y = state.get("ow_offset_base_y", 0)
+        mask_y = state.get("ow_offset_mask_y", 0)
+        base_x = state.get("ow_offset_base_x", 0)
+        mask_x = state.get("ow_offset_mask_x", 0)
+
+        if not mask_y or not mask_x:
+            return
+
+        # Bulk-read the entire map16 WRAM table (4096 uint16 entries = 8192 bytes)
+        map16_data = ra.read_core_memory(_OW_TILEATTR_ADDR, 8192)
+        if not map16_data or len(map16_data) < 8192:
+            return
+
+        for gy in range(self.VP_H):
+            for gx in range(self.VP_W):
+                px = vp_px + gx * 8
+                py = vp_py + gy * 8
+                ow_tx = px >> 3
+                t = ((py - base_y) & mask_y) * 8
+                t |= ((ow_tx - base_x) & mask_x)
+                ow_off = t >> 1
+                byte_off = ow_off * 2
+                if 0 <= byte_off < 8190:
+                    map16_idx = int.from_bytes(
+                        map16_data[byte_off:byte_off + 2], "little")
+                    attr = rom_data.ow_tile_attr(map16_idx, ow_tx, py)
+                    grid[gy][gx] = self._tile_char(attr, False)
+
+    def _tile_char(self, attr: int, indoors: int) -> str:
+        """Map a tile attribute byte to an ASCII character."""
+        ch = self.TILE_CHARS.get(attr)
+        if ch:
+            return ch
+        # Outdoor: 0x04 is grass
+        if attr == 0x04 and not indoors:
+            return ','
+        return '.'
+
+
 # ─── Memory Poller (Background Thread) ────────────────────────────────────────
 
 class MemoryPoller:
@@ -1867,13 +2227,16 @@ class MemoryPoller:
     def __init__(self, ra: RetroArchClient, poll_hz: float = 30.0,
                  dialog_messages: Optional[list[str]] = None,
                  rom_data: Optional[RomData] = None,
-                 diag: bool = False):
+                 diag: bool = False,
+                 map_mode: bool = False):
         self.ra = ra
         self.poll_interval = 1.0 / poll_hz
         self.rom_data = rom_data
         self.diag = diag
+        self.map_mode = map_mode
         self.detector = EventDetector(dialog_messages, rom_data)
         self.proximity = ProximityTracker(ra=ra)
+        self._map_renderer: Optional[MapRenderer] = MapRenderer() if map_mode else None
         self._state: Optional[GameState] = None
         self._state_lock = threading.Lock()
         self._running = False
@@ -1925,6 +2288,9 @@ class MemoryPoller:
 
     def _poll_loop(self):
         prev_state: Optional[GameState] = None
+        # Map mode renders at ~4 Hz regardless of poll rate
+        map_interval = 0.25
+        last_map_render = 0.0
 
         while self._running:
             try:
@@ -1938,14 +2304,11 @@ class MemoryPoller:
                 with self._state_lock:
                     self._state = new_state
 
-                # Initial report when gameplay first detected
+                # Mark initial report done silently (location/health
+                # are available via the look/health commands).
                 module = new_state.get("main_module")
                 if not self._initial_report_done and module in (0x07, 0x09):
                     self._initial_report_done = True
-                    _say(f"Game found. {new_state.world_name}, "
-                         f"{new_state.location_name}.")
-                    _say(f"{new_state.format_health()}. "
-                         f"Facing {new_state.direction_name}.")
 
                 # Detect events and proximity, then output sorted by priority:
                 # 1. Blocked movement  2. Enemy proximity  3. Everything else
@@ -1956,13 +2319,21 @@ class MemoryPoller:
 
                 all_events.sort(key=lambda e: _EVENT_SORT_KEY.get(e.kind, 2))
 
-                for event in all_events:
-                    if self.diag and event.kind in ("PROXIMITY", "FACING"):
-                        _say(f"  [DIAG] {event.message} | {event.data}")
-                    else:
-                        _say(event.message)
-                    if self.diag and event.kind == "ROOM_CHANGE":
-                        self._diag_dump_room(new_state)
+                if self.map_mode and self._map_renderer:
+                    # Render ASCII map at ~4 Hz
+                    now = time.monotonic()
+                    if now - last_map_render >= map_interval:
+                        self._map_renderer.render(
+                            new_state, self.ra, self.rom_data, all_events)
+                        last_map_render = now
+                else:
+                    for event in all_events:
+                        if self.diag and event.kind in ("PROXIMITY", "FACING"):
+                            _say(f"  [DIAG] {event.message} | {event.data}")
+                        else:
+                            _say(event.message)
+                        if self.diag and event.kind == "ROOM_CHANGE":
+                            self._diag_dump_room(new_state)
 
                 prev_state = new_state
 
@@ -2260,8 +2631,8 @@ Examples:
                         help="RetroArch host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=55355,
                         help="RetroArch UDP port (default: 55355)")
-    parser.add_argument("--poll-hz", type=float, default=4.0,
-                        help="Memory poll rate in Hz (default: 4)")
+    parser.add_argument("--poll-hz", type=float, default=30.0,
+                        help="Memory poll rate in Hz (default: 30)")
     parser.add_argument("--rom", default=None,
                         help="Path to ALttP ROM file (.sfc) for geometric room descriptions")
     parser.add_argument("--text", default=None,
@@ -2271,60 +2642,49 @@ Examples:
     parser.add_argument("--dump", nargs="?", const="dump.json", default=None,
                         metavar="FILE",
                         help="Single-shot: read memory once, write state to FILE (default: dump.json), and exit")
+    parser.add_argument("--map", action="store_true",
+                        help="ASCII map mode: render a live tile map instead of text events")
     args = parser.parse_args()
 
     # Load ROM data if provided
     rom_data: Optional[RomData] = None
     if args.rom:
-        _say(f"Loading ROM: {args.rom}")
-        rom_data = load_rom(args.rom)
-        if rom_data:
-            _say("ROM data loaded. Room descriptions will use ROM geometry.")
-        else:
-            _say("Failed to load ROM. Falling back to static descriptions.")
+        if args.diag:
+            _say(f"Loading ROM: {args.rom}")
+        rom_data = load_rom(args.rom, verbose=args.diag)
+        if args.diag:
+            if rom_data:
+                _say("ROM data loaded. Room descriptions will use ROM geometry.")
+            else:
+                _say("Failed to load ROM. Falling back to static descriptions.")
 
     # Load dialog text: prefer ROM-extracted dialog, fall back to text dump
     dialog_messages: list[str] = []
     if rom_data and rom_data.dialog_strings:
         dialog_messages = rom_data.dialog_strings
-        _say(f"Loaded {len(dialog_messages)} dialog messages from ROM.")
     else:
         text_path = args.text or os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "text.txt")
         dialog_messages = load_text_dump(text_path)
-        if dialog_messages:
-            _say(f"Loaded {len(dialog_messages)} dialog messages from text dump.")
-        else:
-            _say("No dialog text available. Provide a ROM with --rom for dialog support.")
 
     # Connect to RetroArch
     ra = RetroArchClient(host=args.host, port=args.port)
     ra.connect()
 
-    _say("Connecting to RetroArch.")
     while True:
         version = ra.get_version()
         if version:
-            _say(f"Connected. RetroArch version {version}.")
             break
-        _say("No response from RetroArch. "
-             "Make sure RetroArch is running with A Link to the Past loaded "
-             "and network commands are enabled in retroarch.cfg.")
-        _say("Retrying in 5 seconds. Press Control C to quit.")
+        if not args.map:
+            _say("Waiting for RetroArch.")
         try:
             time.sleep(5)
         except KeyboardInterrupt:
             ra.close()
-            _say("Goodbye.")
             sys.exit(0)
-
-    status = ra.get_status()
-    if status:
-        _say(f"Status: {status}")
 
     # Single-shot dump mode: read once, write file, exit
     if args.dump:
-        _say("Reading memory for state dump...")
         state = read_memory(ra, rom_data)
         if state.raw.get("main_module") is None:
             _say("Could not read game state. Is a game loaded?")
@@ -2335,34 +2695,48 @@ Examples:
         ra.close()
         sys.exit(0)
 
+    # Map mode: clear screen before starting
+    if args.map:
+        print("\033[2J\033[H", end="", flush=True)
+
     # Start poller
     poller = MemoryPoller(ra, poll_hz=args.poll_hz,
                           dialog_messages=dialog_messages,
                           rom_data=rom_data,
-                          diag=args.diag)
+                          diag=args.diag,
+                          map_mode=args.map)
     poller.start()
 
-    _say("ALttP Accessibility Bridge started. Type help for commands.")
+    if not args.map:
+        _say("Connected.")
 
     try:
-        while True:
-            try:
-                user_input = input("> ").strip()
-            except EOFError:
-                break
+        if args.map:
+            # Map mode: block on KeyboardInterrupt only (Ctrl+C to quit).
+            # No command prompt — the terminal is used for the map display.
+            while True:
+                time.sleep(1)
+        else:
+            while True:
+                try:
+                    user_input = input("> ").strip()
+                except EOFError:
+                    break
 
-            if not user_input:
-                continue
+                if not user_input:
+                    continue
 
-            if user_input.lower() in ("quit", "/quit"):
-                break
+                if user_input.lower() in ("quit", "/quit"):
+                    break
 
-            if handle_command(user_input, poller, ra):
-                continue
+                if handle_command(user_input, poller, ra):
+                    continue
 
-            _say(f"Unknown command: {user_input}. Type help for a list.")
+                _say(f"Unknown command: {user_input}. Type help for a list.")
 
     except KeyboardInterrupt:
+        if args.map:
+            print("\033[2J\033[H", end="", flush=True)
         _say("Interrupted.")
     finally:
         poller.stop()
