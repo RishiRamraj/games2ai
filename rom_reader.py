@@ -121,6 +121,8 @@ SPRITE_TYPE_NAMES: dict[int, tuple[str, str]] = {
     0x3E: ("Bombable guard", SpriteCategory.NPC),
     0x3F: ("Whirlpool", SpriteCategory.HAZARD),
 
+    0x40: ("open chest", SpriteCategory.INTERACTABLE),
+
     # ── Soldiers ──
     0x41: ("Green Soldier", SpriteCategory.ENEMY),
     0x42: ("Blue Soldier", SpriteCategory.ENEMY),
@@ -132,6 +134,7 @@ SPRITE_TYPE_NAMES: dict[int, tuple[str, str]] = {
     0x48: ("Red Javelin Soldier (2)", SpriteCategory.ENEMY),
     0x49: ("Red Bomb Soldier", SpriteCategory.ENEMY),
     0x4A: ("Green Bomb Soldier", SpriteCategory.ENEMY),
+    0x4B: ("lantern", SpriteCategory.OBJECT),
 
     # ── Dungeon enemies ──
     0x53: ("Armos", SpriteCategory.ENEMY),
@@ -282,7 +285,7 @@ DOOR_TYPE_NAMES: dict[int, str] = {
     16: "cave entrance (alt)",
     18: "exit to overworld",
     20: "throne room",
-    22: "player layer change",
+    22: "staircase",
     24: "shutter (two-way)",
     26: "invisible door",
     28: "small key door",
@@ -323,10 +326,12 @@ OBJECT_TYPE_NAMES: dict[int, tuple[str, str]] = {
 
     # ── Subtype 0 (structural with gameplay relevance) ──
     0x21: ("mini stairs", "stairs"),
+    0x22: ("bridge", "feature"),
     0x38: ("statue", "feature"),
     0x3D: ("standing torch", "torch"),
     0x5E: ("block", "block"),
     0x87: ("floor torch", "torch"),
+    0x88: ("statue", "feature"),
     0x89: ("block", "block"),
     0x92: ("blue peg block", "block"),
     0x93: ("orange peg block", "block"),
@@ -494,6 +499,34 @@ class RoomObject:
         return entry[1] if entry else "unknown"
 
 
+def _dedup_sprites(sprites: list[RoomSprite]) -> list[RoomSprite]:
+    """Remove duplicate sprites of the same type at adjacent tiles.
+
+    Some objects (e.g. lanterns) use two sprite slots for lit/unlit
+    states at neighbouring positions.  Collapse these into one entry.
+    """
+    kept: list[RoomSprite] = []
+    seen: set[int] = set()  # indices already consumed
+    by_type: dict[int, list[int]] = {}
+    for i, s in enumerate(sprites):
+        by_type.setdefault(s.sprite_type, []).append(i)
+    for indices in by_type.values():
+        for i in indices:
+            if i in seen:
+                continue
+            seen.add(i)
+            kept.append(sprites[i])
+            si = sprites[i]
+            # Mark adjacent same-type sprites as duplicates
+            for j in indices:
+                if j in seen:
+                    continue
+                sj = sprites[j]
+                if abs(si.x_tile - sj.x_tile) <= 1 and abs(si.y_tile - sj.y_tile) <= 1:
+                    seen.add(j)
+    return kept
+
+
 def _pluralize(name: str) -> str:
     """Pluralize a name, handling parenthetical suffixes.
 
@@ -533,9 +566,9 @@ class RoomData:
     dungeon_name: str = ""
 
     def _classify_sprites(self) -> dict[str, list[str]]:
-        """Group sprite names by category."""
+        """Group sprite names by category (after dedup)."""
         groups: dict[str, list[str]] = {}
-        for s in self.sprites:
+        for s in _dedup_sprites(self.sprites):
             cat = s.category
             groups.setdefault(cat, []).append(s.name)
         return groups
@@ -552,11 +585,24 @@ class RoomData:
         return ", ".join(parts)
 
     def _format_doors(self) -> str:
-        """Format door list for descriptions."""
+        """Format door list for descriptions.
+
+        De-duplicates doors at the same (direction, position) by preferring
+        the more specific type over the generic "open doorway" (type 0).
+        """
         if not self.doors:
             return ""
-        parts = []
+        # De-duplicate: when two doors share direction+position, drop the
+        # generic "open doorway" (type 0) in favour of the specific one.
+        by_loc: dict[tuple[int, int], list[DoorObject]] = {}
         for d in self.doors:
+            by_loc.setdefault((d.direction, d.position), []).append(d)
+        deduped: list[DoorObject] = []
+        for group in by_loc.values():
+            specific = [d for d in group if d.door_type != 0]
+            deduped.extend(specific if specific else group)
+        parts = []
+        for d in deduped:
             parts.append(f"{d.type_name} to the {d.direction_name}")
         return ", ".join(parts)
 
@@ -682,12 +728,61 @@ class RoomData:
         return "\n".join(lines)
 
 
+# ─── Tile Type Names ────────────────────────────────────────────────────────
+# From zelda3 tile_detect.c — maps the tile attribute byte to a human name.
+# Only interesting/interactable tile types are listed; unlisted = passable ground.
+
+TILE_TYPE_NAMES: dict[int, str] = {
+    0x01: "wall", 0x02: "wall", 0x03: "wall",
+    0x04: "thick grass",
+    0x08: "deep water", 0x09: "shallow water",
+    0x0A: "water ladder",
+    0x0D: "spike floor",
+    0x0E: "ice floor", 0x0F: "ice floor",
+    0x1C: "water staircase",
+    0x1D: "stairs", 0x1E: "stairs", 0x1F: "stairs",
+    0x20: "pit",
+    0x22: "stairs",
+    0x26: "wall",
+    0x27: "hookshot target",
+    0x28: "ledge (north)", 0x29: "ledge (south)",
+    0x2A: "ledge (east)", 0x2B: "ledge (west)",
+    0x40: "thick grass",
+    0x42: "gravestone",
+    0x43: "wall",
+    0x44: "cactus",
+    0x46: "sign",
+    0x48: "diggable ground", 0x4A: "diggable ground",
+    0x4B: "warp tile",
+    0x50: "liftable rock", 0x51: "liftable rock",
+    0x52: "liftable rock", 0x53: "liftable rock",
+    0x54: "liftable pot", 0x55: "liftable pot", 0x56: "liftable pot",
+    0x57: "dashable rocks",
+    0x58: "chest", 0x59: "chest", 0x5A: "chest",
+    0x5B: "chest", 0x5C: "chest", 0x5D: "chest",
+    0x60: "rupee tile",
+    0x67: "crystal peg",
+    0x68: "conveyor (north)", 0x69: "conveyor (south)",
+    0x6A: "conveyor (west)", 0x6B: "conveyor (east)",
+    0x8E: "entrance", 0x8F: "entrance",
+}
+
+# ROM table addresses (SNES LoROM) for overworld tile attribute lookup
+_MAP16_TO_MAP8_SNES = 0x8F8000   # 3752 * 4 uint16 entries
+_MAP16_TO_MAP8_COUNT = 3752 * 4
+_MAP8_TO_TILEATTR_SNES = 0x8E9459  # 512 uint8 entries
+_MAP8_TO_TILEATTR_COUNT = 512
+
+
 @dataclass
 class RomData:
     """All parsed ROM data, keyed by room/screen ID."""
     room_data: dict[int, RoomData] = field(default_factory=dict)
     ow_sprites: dict[int, list[RoomSprite]] = field(default_factory=dict)
     dialog_strings: list[str] = field(default_factory=list)
+    # Tile attribute lookup tables (loaded from ROM)
+    map16_to_map8: Optional[list[int]] = field(default=None, repr=False)
+    map8_to_tileattr: Optional[bytes] = field(default=None, repr=False)
 
     def get_room(self, room_id: int) -> Optional[RoomData]:
         return self.room_data.get(room_id)
@@ -695,9 +790,34 @@ class RomData:
     def get_ow_sprites(self, screen_id: int) -> list[RoomSprite]:
         return self.ow_sprites.get(screen_id, [])
 
+    def ow_tile_attr(self, map16_index: int, x: int, y: int) -> int:
+        """Look up the overworld tile attribute for a map16 tile.
+
+        *map16_index* comes from the WRAM overworld_tileattr table at
+        $7E:2000.  *x* and *y* are Link's pixel coordinates (only the
+        low bits are used to select the sub-tile within the map16 cell).
+
+        Returns the tile attribute byte (see TILE_TYPE_NAMES).
+        """
+        if self.map16_to_map8 is None or self.map8_to_tileattr is None:
+            return 0
+        t = map16_index * 4
+        t |= (y & 8) >> 2
+        t |= (x & 1)
+        if t < 0 or t >= len(self.map16_to_map8):
+            return 0
+        map8 = self.map16_to_map8[t]
+        idx = map8 & 0x1FF
+        if idx >= len(self.map8_to_tileattr):
+            return 0
+        rv = self.map8_to_tileattr[idx]
+        if 0x10 <= rv < 0x1C:
+            rv |= (map8 >> 14) & 1
+        return rv
+
     def format_ow_sprites(self, screen_id: int) -> str:
         """Format overworld sprite listing for a screen."""
-        sprites = self.get_ow_sprites(screen_id)
+        sprites = _dedup_sprites(self.get_ow_sprites(screen_id))
         if not sprites:
             return ""
         groups: dict[str, list[str]] = {}
@@ -705,7 +825,8 @@ class RomData:
             groups.setdefault(s.category, []).append(s.name)
         parts = []
         for cat in (SpriteCategory.ENEMY, SpriteCategory.NPC, SpriteCategory.BOSS,
-                     SpriteCategory.HAZARD, SpriteCategory.INTERACTABLE):
+                     SpriteCategory.HAZARD, SpriteCategory.INTERACTABLE,
+                     SpriteCategory.OBJECT):
             if cat in groups:
                 counts = Counter(groups[cat])
                 for name, count in counts.items():
@@ -1357,8 +1478,26 @@ def load_rom(path: str) -> Optional[RomData]:
             dungeon_name=dungeon,
         )
 
+    # Extract tile attribute lookup tables for overworld tile detection
+    map16_to_map8: Optional[list[int]] = None
+    map8_to_tileattr: Optional[bytes] = None
+    try:
+        m16_off = _snes_to_rom(_MAP16_TO_MAP8_SNES) + offset
+        m8_off = _snes_to_rom(_MAP8_TO_TILEATTR_SNES) + offset
+        m16_data = rom[m16_off:m16_off + _MAP16_TO_MAP8_COUNT * 2]
+        map16_to_map8 = list(struct.unpack_from(
+            f"<{_MAP16_TO_MAP8_COUNT}H", m16_data))
+        map8_to_tileattr = rom[m8_off:m8_off + _MAP8_TO_TILEATTR_COUNT]
+        print(f"Loaded tile attribute tables "
+              f"(map16→map8: {len(map16_to_map8)}, "
+              f"map8→attr: {len(map8_to_tileattr)}).")
+    except Exception as e:
+        print(f"Warning: Tile attribute table extraction failed ({e}).")
+
     return RomData(room_data=room_data, ow_sprites=ow_sprites,
-                   dialog_strings=dialog_strings)
+                   dialog_strings=dialog_strings,
+                   map16_to_map8=map16_to_map8,
+                   map8_to_tileattr=map8_to_tileattr)
 
 
 # ─── CLI for Testing ──────────────────────────────────────────────────────────

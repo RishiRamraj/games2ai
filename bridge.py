@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional
 
-from rom_reader import RomData, SpriteCategory, load_rom
+from rom_reader import RomData, SpriteCategory, SPRITE_TYPE_NAMES, load_rom
 
 
 # ─── Memory Address Table ────────────────────────────────────────────────────
@@ -49,6 +49,13 @@ MEMORY_MAP: dict[str, tuple[int, int]] = {
     "dungeon_room":     (0x7E00A0, 2),
     "floor":            (0x7E00A4, 1),
     "world":            (0x7E007B, 1),
+    "lower_level":      (0x7E00EE, 1),
+
+    # Overworld tile offset variables (for tile attribute lookups)
+    "ow_offset_base_y": (0x7E0708, 2),
+    "ow_offset_mask_y": (0x7E070A, 2),
+    "ow_offset_base_x": (0x7E070C, 2),
+    "ow_offset_mask_x": (0x7E070E, 2),
 
     # Health
     "hp":               (0x7EF36D, 1),
@@ -313,6 +320,7 @@ OVERWORLD_NAMES = {
     0x18: "Kakariko Village",
     0x1A: "Haunted Grove",
     0x1B: "Hyrule Castle",
+    0x1C: "Hyrule Castle (east grounds)",
     0x1E: "Eastern Palace",
     0x22: "Sanctuary",
     0x25: "Graveyard",
@@ -685,16 +693,16 @@ ENEMY_NAMES: dict[int, str] = {
     0x29: "Zora",
     0x2B: "Pikit",
     # Hyrule Castle / soldiers
-    0x41: "Soldier",
-    0x42: "Soldier",
-    0x43: "Soldier",
-    0x44: "Soldier",
-    0x45: "Soldier",
-    0x46: "Archer Soldier",
-    0x47: "Soldier",
-    0x48: "Soldier",
-    0x49: "Soldier",
-    0x4A: "Bomb Soldier",
+    0x41: "Green Soldier",
+    0x42: "Blue Soldier",
+    0x43: "Red Soldier",
+    0x44: "Red Soldier",
+    0x45: "Blue Archer",
+    0x46: "Green Archer",
+    0x47: "Blue Soldier",
+    0x48: "Red Soldier",
+    0x49: "Red Bomb Soldier",
+    0x4A: "Green Bomb Soldier",
     # Dungeon enemies
     0x53: "Armos",
     0x58: "Crab",
@@ -722,6 +730,7 @@ ENEMY_NAMES: dict[int, str] = {
 
 # Detection radius in pixels (16 px = 1 tile)
 ENEMY_DETECT_RADIUS = 112   # ~7 tiles
+INTERACT_RADIUS = 24        # ~1.5 tiles — for non-enemy sprite announcements
 
 
 @dataclass
@@ -743,22 +752,51 @@ class Sprite:
 
     @property
     def name(self) -> str:
+        entry = SPRITE_TYPE_NAMES.get(self.type_id)
+        if entry:
+            return entry[0]
         return ENEMY_NAMES.get(self.type_id, f"sprite {self.type_id:#04x}")
+
+    @property
+    def category(self) -> str:
+        entry = SPRITE_TYPE_NAMES.get(self.type_id)
+        return entry[1] if entry else SpriteCategory.UNKNOWN
 
 
 def _direction_label(dx: int, dy: int) -> str:
     """Compass direction from Link to a target.
 
     Positive dy = target is south; positive dx = target is east.
+    Uses a 3:1 ratio threshold so that (dx=-80, dy=6) reports "west"
+    rather than "southwest".
     """
     if abs(dx) < 8 and abs(dy) < 8:
         return "here"
-    ns = "north" if dy < 0 else ("south" if dy > 0 else "")
-    ew = "west" if dx < 0 else ("east" if dx > 0 else "")
-    return f"{ns}{ew}" if (ns or ew) else "here"
+    if abs(dx) > abs(dy) * 3:
+        return "west" if dx < 0 else "east"
+    if abs(dy) > abs(dx) * 3:
+        return "north" if dy < 0 else "south"
+    ns = "north" if dy < 0 else "south"
+    ew = "west" if dx < 0 else "east"
+    return f"{ns}{ew}"
 
 
 # ─── Game State ───────────────────────────────────────────────────────────────
+
+# Pixel offsets from Link's position to the tile ahead, indexed by direction.
+# Link's hitbox is ~16px; we probe 16px ahead of his center.
+_FACING_OFFSETS: dict[int, tuple[int, int]] = {
+    0: (8, -2),    # north
+    2: (8, 24),    # south
+    4: (-2, 12),   # west
+    6: (18, 12),   # east
+}
+
+# Dungeon tile attribute table: $7F:2000 (g_ram+0x12000)
+_DUNG_TILEATTR_ADDR = 0x7F2000
+# Overworld tile map16 table: $7E:2000 (g_ram+0x2000)
+_OW_TILEATTR_ADDR = 0x7E2000
+
 
 @dataclass
 class GameState:
@@ -767,6 +805,7 @@ class GameState:
     sprites: list[Sprite] = field(default_factory=list)
     timestamp: float = 0.0
     rom_data: Optional[RomData] = field(default=None, repr=False)
+    facing_tile: int = -1  # tile attribute byte for the tile Link is facing
 
     def get(self, key: str, default: int = 0) -> int:
         v = self.raw.get(key)
@@ -780,6 +819,14 @@ class GameState:
     @property
     def max_hp_hearts(self) -> float:
         return self.get("max_hp") / 8.0
+
+    @property
+    def facing_tile_name(self) -> Optional[str]:
+        """Human name for the tile Link is facing, or None if passable."""
+        from rom_reader import TILE_TYPE_NAMES
+        if self.facing_tile < 0:
+            return None
+        return TILE_TYPE_NAMES.get(self.facing_tile)
 
     @property
     def direction_name(self) -> str:
@@ -800,7 +847,9 @@ class GameState:
             if name:
                 return f"{name}, room {room:#06x}"
             return f"Dungeon room {room:#06x}"
-        screen = self.get("ow_screen")
+        screen = self.ow_screen_from_coords
+        if screen is None:
+            screen = self.get("ow_screen")
         return OVERWORLD_NAMES.get(screen, f"Overworld {screen:#04x}")
 
     @property
@@ -818,7 +867,9 @@ class GameState:
             name = self.dungeon_name
             return DUNGEON_DESCRIPTIONS.get(name, "")
         # Overworld: static description + ROM sprite listing
-        screen = self.get("ow_screen")
+        screen = self.ow_screen_from_coords
+        if screen is None:
+            screen = self.get("ow_screen")
         desc = OVERWORLD_DESCRIPTIONS.get(screen, "")
         if self.rom_data:
             sprite_text = self.rom_data.format_ow_sprites(screen)
@@ -853,6 +904,26 @@ class GameState:
     @property
     def is_on_overworld(self) -> bool:
         return self.get("main_module") == 0x09
+
+    @property
+    def ow_screen_from_coords(self) -> Optional[int]:
+        """Compute overworld screen index from Link's absolute coordinates.
+
+        The overworld is an 8x8 grid of 512x512-pixel screens.  Link's
+        coordinates at $0020/$0022 are absolute on the overworld, so
+        dividing by 512 gives the screen row/column.  This works even
+        inside 'large areas' where $008A stays constant.
+        """
+        if not self.is_on_overworld:
+            return None
+        x = self.get("link_x")
+        y = self.get("link_y")
+        col = (x >> 9) & 7
+        row = (y >> 9) & 7
+        screen = row * 8 + col
+        if self.get("world"):  # Dark World
+            screen += 0x40
+        return screen
 
     def item_name(self, key: str) -> Optional[str]:
         """Get human-readable name for an item slot, or None if empty."""
@@ -889,7 +960,7 @@ class GameState:
             f"Rupees: {self.get('rupees')}",
             f"Bombs: {self.get('bombs')}",
             f"Arrows: {self.get('arrows')}",
-            f"Keys: {self.get('keys')}",
+            f"Keys: {self.get('keys') if self.get('keys') != 0xFF else 0}",
         ]
         return ". ".join(parts) + "."
 
@@ -957,6 +1028,32 @@ class GameState:
                     "index": s.index,
                     "type_id": s.type_id,
                     "name": s.name,
+                    "distance": int(dist_sq ** 0.5),
+                    "direction": _direction_label(dx, dy),
+                })
+        result.sort(key=lambda e: e["distance"])
+        return result
+
+    def nearby_sprites(self, radius: int = INTERACT_RADIUS) -> list[dict]:
+        """Return all active non-enemy sprites within *radius* pixels of Link."""
+        link_x = self.get("link_x")
+        link_y = self.get("link_y")
+        result: list[dict] = []
+        r_sq = radius * radius
+        for s in self.sprites:
+            if not s.is_active or s.is_enemy:
+                continue
+            if s.category == SpriteCategory.UNKNOWN:
+                continue
+            dx = s.x - link_x
+            dy = s.y - link_y
+            dist_sq = dx * dx + dy * dy
+            if dist_sq <= r_sq:
+                result.append({
+                    "index": s.index,
+                    "type_id": s.type_id,
+                    "name": s.name,
+                    "category": s.category,
                     "distance": int(dist_sq ** 0.5),
                     "direction": _direction_label(dx, dy),
                 })
@@ -1062,12 +1159,21 @@ class EventDetector:
                 {"room": room, "dungeon": dungeon},
             ))
 
-        # Overworld screen change
-        if (curr.get("ow_screen") != prev.get("ow_screen")
-                and curr.is_on_overworld):
-            screen = curr.get("ow_screen")
-            area = OVERWORLD_NAMES.get(screen, f"area {screen:#04x}")
-            desc = OVERWORLD_DESCRIPTIONS.get(screen, "")
+        # Overworld screen change — use coordinate-derived screen so
+        # transitions within "large areas" (where $008A stays constant)
+        # are still detected.
+        curr_ow = curr.ow_screen_from_coords
+        prev_ow = prev.ow_screen_from_coords
+        if curr_ow is not None and curr_ow != prev_ow:
+            screen = curr_ow
+            # Fall back to $008A area ID for names/descriptions, since
+            # OVERWORLD_NAMES may be keyed by area rather than sub-screen.
+            area_id = curr.get("ow_screen")
+            area = (OVERWORLD_NAMES.get(screen)
+                    or OVERWORLD_NAMES.get(area_id)
+                    or f"area {screen:#04x}")
+            desc = (OVERWORLD_DESCRIPTIONS.get(screen)
+                    or OVERWORLD_DESCRIPTIONS.get(area_id, ""))
             msg = f"Entered {area}."
             if desc:
                 msg += f" {desc}"
@@ -1144,11 +1250,13 @@ class EventDetector:
                     {"item": key, "name": name},
                 ))
 
-        # Key acquired
-        if curr.get("keys") > prev.get("keys"):
+        # Key acquired (0xFF = uninitialised / outside dungeon, not a real count)
+        curr_keys = curr.get("keys")
+        prev_keys = prev.get("keys")
+        if curr_keys != 0xFF and prev_keys != 0xFF and curr_keys > prev_keys:
             events.append(Event(
                 "KEY_ACQUIRED", EventPriority.LOW,
-                f"Got a key! Keys: {curr.get('keys')}.",
+                f"Got a key! Keys: {curr_keys}.",
             ))
 
         # Health restored
@@ -1214,6 +1322,32 @@ class EventDetector:
                             "ENEMY_NEARBY", EventPriority.HIGH,
                             f"{e['name']} to the {e['direction']}!",
                         ))
+
+        # Non-enemy sprite proximity (NPCs, interactables, objects)
+        if curr_mod in GAMEPLAY_MODULES:
+            curr_spr = curr.nearby_sprites()
+            prev_spr = prev.nearby_sprites()
+            curr_spr_set = {(e["index"], e["type_id"]) for e in curr_spr}
+            prev_spr_set = {(e["index"], e["type_id"]) for e in prev_spr}
+
+            new_spr = curr_spr_set - prev_spr_set
+            if new_spr:
+                for e in curr_spr:
+                    if (e["index"], e["type_id"]) in new_spr:
+                        events.append(Event(
+                            "SPRITE_NEARBY", EventPriority.MEDIUM,
+                            f"{e['name']} to the {e['direction']}.",
+                        ))
+
+        # Facing-tile change: announce when Link faces a new interactable tile
+        if curr_mod in GAMEPLAY_MODULES:
+            curr_tile = curr.facing_tile_name
+            prev_tile = prev.facing_tile_name
+            if curr_tile and curr_tile != prev_tile:
+                events.append(Event(
+                    "FACING_TILE", EventPriority.LOW,
+                    f"Facing {curr_tile}.",
+                ))
 
         return events
 
@@ -1299,8 +1433,40 @@ def read_memory(ra: RetroArchClient,
                 y=y,
             ))
 
+    # Read the tile attribute for the tile Link is facing
+    facing_tile = -1
+    direction = raw.get("direction")
+    link_x = raw.get("link_x")
+    link_y = raw.get("link_y")
+    module = raw.get("main_module")
+    if direction is not None and link_x and link_y and module in (0x07, 0x09):
+        off = _FACING_OFFSETS.get(direction)
+        if off:
+            tx = link_x + off[0]
+            ty = link_y + off[1]
+            if module == 0x07:
+                # Indoor: read directly from dung_bg2_attr_table ($7F:2000)
+                lower = raw.get("lower_level", 0)
+                dung_off = (ty & ~7) * 8 + (tx & 63) + (0x1000 if lower else 0)
+                tile_data = ra.read_core_memory(_DUNG_TILEATTR_ADDR + dung_off, 1)
+                if tile_data:
+                    facing_tile = tile_data[0]
+            elif rom_data and rom_data.map16_to_map8 is not None:
+                # Overworld: read map16 index from WRAM, then look up via ROM tables
+                base_y = raw.get("ow_offset_base_y", 0)
+                mask_y = raw.get("ow_offset_mask_y", 0)
+                base_x = raw.get("ow_offset_base_x", 0)
+                mask_x = raw.get("ow_offset_mask_x", 0)
+                t = ((ty - base_y) & mask_y) * 8
+                t |= ((tx - base_x) & mask_x)
+                ow_off = t >> 1  # uint16 index
+                tile_data = ra.read_core_memory(_OW_TILEATTR_ADDR + ow_off * 2, 2)
+                if tile_data:
+                    map16_idx = int.from_bytes(tile_data, "little")
+                    facing_tile = rom_data.ow_tile_attr(map16_idx, tx, ty)
+
     return GameState(raw=raw, sprites=sprites, timestamp=time.time(),
-                     rom_data=rom_data)
+                     rom_data=rom_data, facing_tile=facing_tile)
 
 
 
@@ -1338,31 +1504,45 @@ class ProximityTracker:
 
     # Object categories worth announcing
     _ANNOUNCE_CATEGORIES = {"chest", "stairs", "pit", "hazard", "switch",
-                            "block", "water", "wall", "shrub"}
+                            "block", "water", "wall", "shrub", "feature",
+                            "torch", "interactable"}
 
     def __init__(self) -> None:
         self._current_room: int = -1
+        self._current_ow_screen: int = -1
         self._announced: dict[str, str] = {}  # feature key -> zone
 
     def check(self, state: GameState) -> list[Event]:
         """Return proximity events for the current poll cycle."""
-        if not state.rom_data or not state.is_in_dungeon:
+        if not state.rom_data:
             return []
 
-        room_id = state.get("dungeon_room")
-        if room_id != self._current_room:
-            self._current_room = room_id
-            self._announced.clear()
+        features: list[tuple[str, int, int, str]] = []
 
-        room = state.rom_data.get_room(room_id)
-        if not room:
+        if state.is_in_dungeon:
+            room_id = state.get("dungeon_room")
+            if room_id != self._current_room:
+                self._current_room = room_id
+                self._announced.clear()
+            room = state.rom_data.get_room(room_id)
+            if room:
+                features = self._get_features(room)
+        elif state.is_on_overworld:
+            ow_screen = state.ow_screen_from_coords
+            if ow_screen is not None and ow_screen != self._current_ow_screen:
+                self._current_ow_screen = ow_screen
+                self._announced.clear()
+            if ow_screen is not None:
+                features = self._get_ow_features(state.rom_data, ow_screen)
+
+        if not features:
             return []
 
         link_x = state.get("link_x")
         link_y = state.get("link_y")
         events: list[Event] = []
 
-        for key, px, py, desc in self._get_features(room):
+        for key, px, py, desc in features:
             dx = px - link_x
             dy = py - link_y
             dist = (dx * dx + dy * dy) ** 0.5
@@ -1389,19 +1569,29 @@ class ProximityTracker:
 
     def scan(self, state: GameState) -> list[str]:
         """List all features within approach range, sorted by distance."""
-        if not state.rom_data or not state.is_in_dungeon:
+        if not state.rom_data:
             return []
 
-        room_id = state.get("dungeon_room")
-        room = state.rom_data.get_room(room_id)
-        if not room:
+        features: list[tuple[str, int, int, str]] = []
+
+        if state.is_in_dungeon:
+            room_id = state.get("dungeon_room")
+            room = state.rom_data.get_room(room_id)
+            if room:
+                features = self._get_features(room)
+        elif state.is_on_overworld:
+            ow_screen = state.ow_screen_from_coords
+            if ow_screen is not None:
+                features = self._get_ow_features(state.rom_data, ow_screen)
+
+        if not features:
             return []
 
         link_x = state.get("link_x")
         link_y = state.get("link_y")
         results: list[tuple[float, str]] = []
 
-        for _key, px, py, desc in self._get_features(room):
+        for _key, px, py, desc in features:
             dx = px - link_x
             dy = py - link_y
             dist = (dx * dx + dy * dy) ** 0.5
@@ -1432,14 +1622,45 @@ class ProximityTracker:
                 key = f"obj:{obj.object_type}:{obj.x_tile}:{obj.y_tile}"
                 features.append((key, px, py, obj.name))
 
-        # Sprites — hazard category only (enemies handled separately)
+        # ROM sprites — all categories except enemy (live enemies handled
+        # separately via the sprite table with real-time positions).
         for spr in room.sprites:
-            if spr.category == SpriteCategory.HAZARD:
+            if spr.category not in (SpriteCategory.ENEMY, SpriteCategory.UNKNOWN):
                 px = spr.x_tile * 16
                 py = spr.y_tile * 16
                 key = f"spr:{spr.sprite_type}:{spr.x_tile}:{spr.y_tile}"
                 features.append((key, px, py, spr.name))
 
+        return features
+
+    def _get_ow_features(self, rom_data: RomData,
+                         screen: int) -> list[tuple[str, int, int, str]]:
+        """Extract announceable overworld sprites as (key, px, py, desc).
+
+        Overworld sprite tile coordinates are relative to the 32x32 tile
+        screen.  To get absolute pixel positions we offset by the screen's
+        position in the 8x8 grid (each screen = 512 px).
+        """
+        from rom_reader import _dedup_sprites
+        sprites = _dedup_sprites(rom_data.get_ow_sprites(screen))
+        if not sprites:
+            return []
+        # Screen origin in absolute pixels
+        col = screen & 7
+        row = (screen >> 3) & 7
+        ox = col * 512
+        oy = row * 512
+        features: list[tuple[str, int, int, str]] = []
+        for spr in sprites:
+            if spr.category == SpriteCategory.UNKNOWN:
+                continue
+            # Enemies are handled by the live sprite table, but ROM
+            # positions are static; include them so the approach zone
+            # still fires for patrol-route enemies.
+            px = ox + spr.x_tile * 16
+            py = oy + spr.y_tile * 16
+            key = f"ow:{spr.sprite_type}:{spr.x_tile}:{spr.y_tile}"
+            features.append((key, px, py, spr.name))
         return features
 
 
@@ -1587,6 +1808,9 @@ def dump_state(state: GameState, path: str = "dump.json") -> str:
         "position": {"x": state.get("link_x"), "y": state.get("link_y")},
         "dungeon_room": f"0x{state.get('dungeon_room'):04X}",
         "ow_screen": f"0x{state.get('ow_screen'):04X}",
+        "ow_screen_from_coords": (f"0x{state.ow_screen_from_coords:02X}"
+                                   if state.ow_screen_from_coords is not None
+                                   else None),
     }
 
     # Live sprite table (from emulator memory)
