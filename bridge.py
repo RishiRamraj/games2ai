@@ -1547,8 +1547,8 @@ class ProximityTracker:
     tracking on room change.
     """
 
-    APPROACH_DIST = 64   # ~4 tiles
-    NEARBY_DIST = 32     # ~2 tiles
+    APPROACH_DIST = 112  # ~14 tiles
+    NEARBY_DIST = 64     # ~8 tiles
 
     # Exact door tile positions from zelda3 kDoorPositionToTilemapOffs tables.
     # Key: (direction, position), Value: (x_tile, y_tile) in the 64×64 room grid.
@@ -1584,7 +1584,7 @@ class ProximityTracker:
     # Doorway tile attribute values (from zelda3 tile_detect.c TileHandlerIndoor_22)
     _DOORWAY_TILES = frozenset(range(0x30, 0x38))
 
-    # 45° cone tile offsets per direction, grouped by distance (1-4 tiles).
+    # 45° cone tile offsets per direction, grouped by distance (1-8 tiles).
     # Each entry is (dx, dy) in 8-px tile units relative to Link's tile.
     _CONE_OFFSETS: dict[int, list[list[tuple[int, int]]]] = {
         0: [  # north (-y)
@@ -1592,24 +1592,40 @@ class ProximityTracker:
             [(-1, -2), (0, -2), (1, -2)],
             [(-1, -3), (0, -3), (1, -3)],
             [(-2, -4), (-1, -4), (0, -4), (1, -4), (2, -4)],
+            [(-2, -5), (-1, -5), (0, -5), (1, -5), (2, -5)],
+            [(-3, -6), (-2, -6), (-1, -6), (0, -6), (1, -6), (2, -6), (3, -6)],
+            [(-3, -7), (-2, -7), (-1, -7), (0, -7), (1, -7), (2, -7), (3, -7)],
+            [(-4, -8), (-3, -8), (-2, -8), (-1, -8), (0, -8), (1, -8), (2, -8), (3, -8), (4, -8)],
         ],
         2: [  # south (+y)
             [(0, 1)],
             [(-1, 2), (0, 2), (1, 2)],
             [(-1, 3), (0, 3), (1, 3)],
             [(-2, 4), (-1, 4), (0, 4), (1, 4), (2, 4)],
+            [(-2, 5), (-1, 5), (0, 5), (1, 5), (2, 5)],
+            [(-3, 6), (-2, 6), (-1, 6), (0, 6), (1, 6), (2, 6), (3, 6)],
+            [(-3, 7), (-2, 7), (-1, 7), (0, 7), (1, 7), (2, 7), (3, 7)],
+            [(-4, 8), (-3, 8), (-2, 8), (-1, 8), (0, 8), (1, 8), (2, 8), (3, 8), (4, 8)],
         ],
         4: [  # west (-x)
             [(-1, 0)],
             [(-2, -1), (-2, 0), (-2, 1)],
             [(-3, -1), (-3, 0), (-3, 1)],
             [(-4, -2), (-4, -1), (-4, 0), (-4, 1), (-4, 2)],
+            [(-5, -2), (-5, -1), (-5, 0), (-5, 1), (-5, 2)],
+            [(-6, -3), (-6, -2), (-6, -1), (-6, 0), (-6, 1), (-6, 2), (-6, 3)],
+            [(-7, -3), (-7, -2), (-7, -1), (-7, 0), (-7, 1), (-7, 2), (-7, 3)],
+            [(-8, -4), (-8, -3), (-8, -2), (-8, -1), (-8, 0), (-8, 1), (-8, 2), (-8, 3), (-8, 4)],
         ],
         6: [  # east (+x)
             [(1, 0)],
             [(2, -1), (2, 0), (2, 1)],
             [(3, -1), (3, 0), (3, 1)],
             [(4, -2), (4, -1), (4, 0), (4, 1), (4, 2)],
+            [(5, -2), (5, -1), (5, 0), (5, 1), (5, 2)],
+            [(6, -3), (6, -2), (6, -1), (6, 0), (6, 1), (6, 2), (6, 3)],
+            [(7, -3), (7, -2), (7, -1), (7, 0), (7, 1), (7, 2), (7, 3)],
+            [(8, -4), (8, -3), (8, -2), (8, -1), (8, 0), (8, 1), (8, 2), (8, 3), (8, 4)],
         ],
     }
 
@@ -1621,7 +1637,6 @@ class ProximityTracker:
         self._doorway_features: list[tuple[str, int, int, str]] = []
         self._last_cone: str = ""  # last announced cone description
         self._last_direction: int = -1  # track Link's facing direction
-        self._last_enemies: list[tuple[int, int]] = []  # (slot, type_id) for dedup
 
     def check(self, state: GameState) -> list[Event]:
         """Return proximity events for the current poll cycle."""
@@ -1719,10 +1734,6 @@ class ProximityTracker:
             events.append(Event("CONE_TILE", EventPriority.LOW, cone_msg))
             self._last_cone = cone_msg
 
-        # Moving object proximity: report enemies/projectiles closest to Link.
-        enemy_events = self._scan_enemies(state)
-        events.extend(enemy_events)
-
         return events
 
     def scan(self, state: GameState) -> list[str]:
@@ -1806,39 +1817,6 @@ class ProximityTracker:
                         return f"{name} {tiles} ahead, {side}."
                     return f"{name} {tiles} ahead."
         return ""
-
-    def _scan_enemies(self, state: GameState) -> list[Event]:
-        """Report enemies and projectiles near Link, closest first.
-        Only announces when the set of nearby enemies changes."""
-        link_x = state.get("link_x")
-        link_y = state.get("link_y")
-        if not link_x or not link_y:
-            return []
-
-        nearby: list[tuple[int, int, int, str, str]] = []  # (dist, slot, type, name, dir)
-        for s in state.sprites:
-            if not s.is_active or not s.is_enemy:
-                continue
-            dx = s.x - link_x
-            dy = s.y - link_y
-            dist = int((dx * dx + dy * dy) ** 0.5)
-            if dist <= ENEMY_DETECT_RADIUS:
-                direction = _direction_label(dx, dy)
-                nearby.append((dist, s.index, s.type_id, s.name, direction))
-        nearby.sort()  # closest first
-
-        curr_set = [(slot, tid) for _, slot, tid, _, _ in nearby]
-        if curr_set == self._last_enemies:
-            return []
-        self._last_enemies = curr_set
-
-        events: list[Event] = []
-        for dist, slot, tid, name, direction in nearby:
-            events.append(Event(
-                "ENEMY_PROXIMITY", EventPriority.HIGH,
-                f"{name} {direction}, {dist} away.",
-            ))
-        return events
 
     @staticmethod
     def _cone_side(direction: int, dx: int, dy: int) -> str:
@@ -2067,12 +2045,23 @@ class MapRenderer:
     # Link direction -> character
     LINK_CHARS: dict[int, str] = {0: '^', 2: 'v', 4: '<', 6: '>'}
 
-    def __init__(self) -> None:
+    # Characters for overlay zones (only drawn on passable tiles)
+    _OVERLAY_PASSABLE = {'.', ' ', ','}
+    _CONE_CHAR = ':'
+    _NEARBY_CHAR = '1'     # nearby radius
+    _APPROACH_CHAR = '2'   # approach radius
+
+    _EVENT_TTL = 5.0  # seconds before sidebar events expire
+
+    def __init__(self, overlay: bool = False) -> None:
         self._frame_count = 0
+        self.overlay = overlay
+        self._event_log: list[tuple[float, str]] = []
 
     def render(self, state: GameState, ra: RetroArchClient,
                rom_data: Optional[RomData] = None,
-               events: Optional[list[Event]] = None) -> None:
+               events: Optional[list[Event]] = None,
+               snapshot: bool = False) -> None:
         """Render one frame of the ASCII map to the terminal."""
         module = state.get("main_module")
         link_x = state.get("link_x")
@@ -2098,6 +2087,11 @@ class MapRenderer:
             self._fill_dungeon(grid, ra, state, vp_px, vp_py, indoors)
         elif module == 0x09 and rom_data:
             self._fill_overworld(grid, ra, state, rom_data, vp_px, vp_py)
+
+        # Overlay detection zones (cone + radii) on passable tiles
+        if self.overlay:
+            self._draw_overlay(grid, state.get("direction"),
+                               (self.VP_W // 2), (self.VP_H // 2))
 
         # Overlay sprites (their coords are also sprite-origin, so apply
         # the same body offset for consistent placement)
@@ -2127,9 +2121,28 @@ class MapRenderer:
         # shorter frames don't leave ghost characters from previous ones.
         self._frame_count += 1
         eol = "\033[K"
+
+        # Update the event sidebar log
+        now = time.monotonic()
+        if events:
+            for e in events:
+                self._event_log.append((now, e.message))
+        # Expire old entries
+        self._event_log = [(t, m) for t, m in self._event_log
+                           if now - t < self._EVENT_TTL]
+
+        # Build map lines with optional event sidebar on the right
+        map_width = self.VP_W * 2  # each tile is doubled horizontally
+        sidebar_gap = "  "
         lines: list[str] = []
-        for row in grid:
-            lines.append(''.join(ch * 2 for ch in row) + eol)
+        for i, row in enumerate(grid):
+            map_line = ''.join(ch * 2 for ch in row)
+            if self.overlay and i < len(self._event_log):
+                _, msg = self._event_log[-(i + 1)]  # newest first
+                lines.append(map_line + sidebar_gap + msg + eol)
+            else:
+                lines.append(map_line + eol)
+
         # Status line
         lines.append(eol)
         room_info = state.location_name
@@ -2140,14 +2153,21 @@ class MapRenderer:
             f"HP: {hp_str}  "
             f"Loc: {room_info}" + eol
         )
-        # Show recent events if any
-        if events:
-            recent = [e.message for e in events[:3]]
-            lines.append("  ".join(recent) + eol)
+        # Overlay legend
+        if self.overlay:
+            lines.append(
+                f": cone  "
+                f"{self._NEARBY_CHAR} nearby({ProximityTracker.NEARBY_DIST}px)  "
+                f"{self._APPROACH_CHAR} approach({ProximityTracker.APPROACH_DIST}px)" + eol
+            )
+        # Output the frame
+        if snapshot:
+            # Strip ANSI escapes for clean single-shot output
+            clean = [line.replace(eol, '') for line in lines]
+            print('\n'.join(clean), end="", flush=True)
         else:
-            lines.append(eol)
-        # Cursor home, draw frame, then clear everything below
-        print("\033[H" + '\n'.join(lines) + "\033[J", end="", flush=True)
+            # Cursor home, draw frame, then clear everything below
+            print("\033[H" + '\n'.join(lines) + "\033[J", end="", flush=True)
 
     def _fill_dungeon(self, grid: list[list[str]],
                       ra: RetroArchClient, state: GameState,
@@ -2218,6 +2238,48 @@ class MapRenderer:
             return ','
         return '.'
 
+    def _draw_overlay(self, grid: list[list[str]], direction: int,
+                      cx: int, cy: int) -> None:
+        """Draw detection radii and facing cone onto passable grid cells.
+
+        cx, cy are Link's grid position (viewport centre).
+        Radii are drawn outermost-first so inner zones overwrite outer.
+        """
+        passable = self._OVERLAY_PASSABLE
+
+        # Convert pixel radii to tile units (8px per tile)
+        approach_r = ProximityTracker.APPROACH_DIST / 8.0  # ~14 tiles
+        nearby_r = ProximityTracker.NEARBY_DIST / 8.0      # ~8 tiles
+
+        # Draw radius rings (outermost first).  A cell is on a ring if
+        # its distance from centre is within ±0.7 tiles of the radius.
+        rings = [
+            (approach_r, self._APPROACH_CHAR),
+            (nearby_r, self._NEARBY_CHAR),
+        ]
+        for gy in range(self.VP_H):
+            for gx in range(self.VP_W):
+                if grid[gy][gx] not in passable:
+                    continue
+                dx = gx - cx
+                dy = gy - cy
+                dist = (dx * dx + dy * dy) ** 0.5
+                for radius, ch in rings:
+                    if abs(dist - radius) < 0.7:
+                        grid[gy][gx] = ch
+                        break
+
+        # Draw the facing cone (from ProximityTracker._CONE_OFFSETS)
+        cone = ProximityTracker._CONE_OFFSETS.get(direction)
+        if cone:
+            for ring in cone:
+                for dx, dy in ring:
+                    gx = cx + dx
+                    gy = cy + dy
+                    if (0 <= gx < self.VP_W and 0 <= gy < self.VP_H
+                            and grid[gy][gx] in passable):
+                        grid[gy][gx] = self._CONE_CHAR
+
 
 # ─── Memory Poller (Background Thread) ────────────────────────────────────────
 
@@ -2228,7 +2290,8 @@ class MemoryPoller:
                  dialog_messages: Optional[list[str]] = None,
                  rom_data: Optional[RomData] = None,
                  diag: bool = False,
-                 map_mode: bool = False):
+                 map_mode: bool = False,
+                 map_overlay: bool = False):
         self.ra = ra
         self.poll_interval = 1.0 / poll_hz
         self.rom_data = rom_data
@@ -2236,7 +2299,8 @@ class MemoryPoller:
         self.map_mode = map_mode
         self.detector = EventDetector(dialog_messages, rom_data)
         self.proximity = ProximityTracker(ra=ra)
-        self._map_renderer: Optional[MapRenderer] = MapRenderer() if map_mode else None
+        self._map_renderer: Optional[MapRenderer] = (
+            MapRenderer(overlay=map_overlay) if map_mode else None)
         self._state: Optional[GameState] = None
         self._state_lock = threading.Lock()
         self._running = False
@@ -2644,6 +2708,10 @@ Examples:
                         help="Single-shot: read memory once, write state to FILE (default: dump.json), and exit")
     parser.add_argument("--map", action="store_true",
                         help="ASCII map mode: render a live tile map instead of text events")
+    parser.add_argument("--map-overlay", action="store_true",
+                        help="Show detection cone and radii around Link (requires --map)")
+    parser.add_argument("--map-snap", action="store_true",
+                        help="Single-shot: print one ASCII map frame with overlay and exit")
     args = parser.parse_args()
 
     # Load ROM data if provided
@@ -2695,6 +2763,19 @@ Examples:
         ra.close()
         sys.exit(0)
 
+    # Single-shot map snapshot: render one frame and exit
+    if args.map_snap:
+        state = read_memory(ra, rom_data)
+        if state.raw.get("main_module") is None:
+            _say("Could not read game state. Is a game loaded?")
+            ra.close()
+            sys.exit(1)
+        renderer = MapRenderer(overlay=True)
+        renderer.render(state, ra, rom_data, snapshot=True)
+        print()  # trailing newline
+        ra.close()
+        sys.exit(0)
+
     # Map mode: clear screen before starting
     if args.map:
         print("\033[2J\033[H", end="", flush=True)
@@ -2704,7 +2785,8 @@ Examples:
                           dialog_messages=dialog_messages,
                           rom_data=rom_data,
                           diag=args.diag,
-                          map_mode=args.map)
+                          map_mode=args.map,
+                          map_overlay=args.map_overlay)
     poller.start()
 
     if not args.map:
