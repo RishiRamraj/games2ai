@@ -243,12 +243,23 @@ SPRITE_TYPE_NAMES: dict[int, tuple[str, str]] = {
     0xD4: ("Whirlpool", SpriteCategory.HAZARD),
     0xD6: ("Ganon", SpriteCategory.BOSS),
     0xD7: ("Agahnim", SpriteCategory.BOSS),
-    0xD8: ("Agahnim energy ball", SpriteCategory.HAZARD),
+    # ── Item drops (0xD8-0xE6) ──
+    0xD8: ("Heart", SpriteCategory.INTERACTABLE),
+    0xD9: ("Green Rupee", SpriteCategory.INTERACTABLE),
+    0xDA: ("Blue Rupee", SpriteCategory.INTERACTABLE),
+    0xDB: ("Red Rupee", SpriteCategory.INTERACTABLE),
+    0xDC: ("Bombs (1)", SpriteCategory.INTERACTABLE),
+    0xDD: ("Bombs (4)", SpriteCategory.INTERACTABLE),
+    0xDE: ("Bombs (8)", SpriteCategory.INTERACTABLE),
+    0xDF: ("Small Magic Jar", SpriteCategory.INTERACTABLE),
+    0xE0: ("Large Magic Jar", SpriteCategory.INTERACTABLE),
+    0xE1: ("Arrows (5)", SpriteCategory.INTERACTABLE),
+    0xE2: ("Arrows (10)", SpriteCategory.INTERACTABLE),
 
     # ── NPCs / overworld characters ──
     0xE3: ("Fairy", SpriteCategory.NPC),
-    0xE4: ("Small key", SpriteCategory.INTERACTABLE),
-    0xE5: ("Big key", SpriteCategory.INTERACTABLE),
+    0xE4: ("Small Key", SpriteCategory.INTERACTABLE),
+    0xE5: ("Big Key", SpriteCategory.INTERACTABLE),
     0xE8: ("Mushroom", SpriteCategory.INTERACTABLE),
     0xE9: ("Fake Master Sword", SpriteCategory.OBJECT),
     0xEB: ("Shopkeeper", SpriteCategory.NPC),
@@ -326,7 +337,6 @@ OBJECT_TYPE_NAMES: dict[int, tuple[str, str]] = {
 
     # ── Subtype 0 (structural with gameplay relevance) ──
     0x21: ("mini stairs", "stairs"),
-    0x22: ("bridge", "feature"),
     0x38: ("statue", "feature"),
     0x3D: ("standing torch", "torch"),
     0x5E: ("block", "block"),
@@ -754,7 +764,7 @@ TILE_TYPE_NAMES: dict[int, str] = {
     0x46: "sign",
     0x48: "diggable ground", 0x4A: "diggable ground",
     0x4B: "warp tile",
-    0x50: "liftable rock", 0x51: "liftable rock",
+    0x50: "bush", 0x51: "bush",
     0x52: "liftable rock", 0x53: "liftable rock",
     0x54: "liftable pot", 0x55: "liftable pot", 0x56: "liftable pot",
     0x57: "dashable rocks",
@@ -764,6 +774,15 @@ TILE_TYPE_NAMES: dict[int, str] = {
     0x67: "crystal peg",
     0x68: "conveyor (north)", 0x69: "conveyor (south)",
     0x6A: "conveyor (west)", 0x6B: "conveyor (east)",
+    # 0x70-0x7F: TileBehavior_ManipulablyReplaced — pushable blocks/statues
+    0x70: "pushable block", 0x71: "pushable block",
+    0x72: "pushable block", 0x73: "pushable block",
+    0x74: "pushable block", 0x75: "pushable block",
+    0x76: "pushable block", 0x77: "pushable block",
+    0x78: "pushable block", 0x79: "pushable block",
+    0x7A: "pushable block", 0x7B: "pushable block",
+    0x7C: "pushable block", 0x7D: "pushable block",
+    0x7E: "pushable block", 0x7F: "pushable block",
     0x8E: "entrance", 0x8F: "entrance",
 }
 

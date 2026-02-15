@@ -120,7 +120,7 @@ MEMORY_MAP: dict[str, tuple[int, int]] = {
     "ganon_state":      (0x7E04C5, 1),
 
     # Dialog
-    "dialog_id":        (0x7E012C, 2),
+    "dialog_id":        (0x7E1CF0, 2),  # dialogue_message_index
 }
 
 
@@ -731,6 +731,10 @@ ENEMY_NAMES: dict[int, str] = {
     0xD7: "Agahnim",
 }
 
+# Item drop sprite type IDs (0xD8-0xE5).  When an enemy dies it may
+# respawn in the same slot with one of these types.
+ITEM_DROP_IDS: set[int] = set(range(0xD8, 0xE6))
+
 # Detection radius in pixels (16 px = 1 tile)
 ENEMY_DETECT_RADIUS = 112   # ~7 tiles
 INTERACT_RADIUS = 24        # ~1.5 tiles — for non-enemy sprite announcements
@@ -1094,6 +1098,18 @@ class Event:
     data: dict = field(default_factory=dict)
 
 
+# Output sort order: blocked movement first, enemy alerts second, rest last.
+_EVENT_SORT_KEY: dict[str, int] = {
+    "BLOCKED": 0,
+    "ENEMY_NEARBY": 1,
+    "DAMAGE_TAKEN": 1,
+    "LOW_HEALTH": 1,
+    "NEAR_PIT": 1,
+    "DEATH": 1,
+    # Everything else defaults to 2 via .get(kind, 2)
+}
+
+
 # All inventory keys that can be acquired (0 -> non-zero)
 _INVENTORY_KEYS = (
     list(BOOLEAN_ITEMS.keys())
@@ -1333,6 +1349,21 @@ class EventDetector:
                             "ENEMY_NEARBY", EventPriority.HIGH,
                             f"{e['name']} to the {e['direction']}!",
                         ))
+
+        # Item drops: a sprite slot that was an enemy now holds an item
+        if curr_mod in GAMEPLAY_MODULES:
+            for cs in curr.sprites:
+                if cs.type_id not in ITEM_DROP_IDS or not cs.is_active:
+                    continue
+                # Check if this slot previously held something else
+                if cs.index < len(prev.sprites):
+                    ps = prev.sprites[cs.index]
+                    if ps.type_id == cs.type_id and ps.is_active:
+                        continue  # same item, already announced
+                events.append(Event(
+                    "ITEM_DROP", EventPriority.MEDIUM,
+                    f"{cs.name} dropped!",
+                ))
 
         # Non-enemy sprite proximity (NPCs, interactables, objects)
         if curr_mod in GAMEPLAY_MODULES:
@@ -1833,7 +1864,7 @@ class ProximityTracker:
 class MemoryPoller:
     """Polls emulator memory at ~4 Hz, detects events, prints output."""
 
-    def __init__(self, ra: RetroArchClient, poll_hz: float = 10.0,
+    def __init__(self, ra: RetroArchClient, poll_hz: float = 30.0,
                  dialog_messages: Optional[list[str]] = None,
                  rom_data: Optional[RomData] = None,
                  diag: bool = False):
@@ -1916,22 +1947,22 @@ class MemoryPoller:
                     _say(f"{new_state.format_health()}. "
                          f"Facing {new_state.direction_name}.")
 
-                # Detect events
+                # Detect events and proximity, then output sorted by priority:
+                # 1. Blocked movement  2. Enemy proximity  3. Everything else
+                all_events: list[Event] = []
                 if prev_state is not None:
-                    events = self.detector.detect(prev_state, new_state)
-                    for event in events:
-                        _say(event.message)
-                        # Diag: dump room features on room change
-                        if self.diag and event.kind == "ROOM_CHANGE":
-                            self._diag_dump_room(new_state)
+                    all_events.extend(self.detector.detect(prev_state, new_state))
+                all_events.extend(self.proximity.check(new_state))
 
-                # Proximity announcements
-                prox_events = self.proximity.check(new_state)
-                for event in prox_events:
-                    if self.diag:
+                all_events.sort(key=lambda e: _EVENT_SORT_KEY.get(e.kind, 2))
+
+                for event in all_events:
+                    if self.diag and event.kind in ("PROXIMITY", "FACING"):
                         _say(f"  [DIAG] {event.message} | {event.data}")
                     else:
                         _say(event.message)
+                    if self.diag and event.kind == "ROOM_CHANGE":
+                        self._diag_dump_room(new_state)
 
                 prev_state = new_state
 
