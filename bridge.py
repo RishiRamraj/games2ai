@@ -2,24 +2,19 @@
 """
 ALttP Accessibility Bridge
 ===========================
-Dedicated A Link to the Past accessibility guide that polls emulator memory,
-detects game events locally in Python, and calls Claude only when something
-meaningful happens -- producing screen-reader-friendly narration for a
-blind player.
+A Link to the Past accessibility tool that polls RetroArch emulator memory,
+detects game events, and provides screen-reader-friendly output for
+blind and visually impaired players.
 
 Setup:
-  1. In retroarch.cfg, set:
+  1. In retroarch.cfg set:
        network_cmd_enable = "true"
        network_cmd_port = "55355"
-  2. pip install anthropic
-  3. export ANTHROPIC_API_KEY=sk-ant-...
-  4. Launch RetroArch with bsnes-mercury core and ALttP ROM
-  5. python bridge.py
+  2. Launch RetroArch with bsnes-mercury core and your ALttP ROM
+  3. python bridge.py
 """
 
 import argparse
-import json
-import os
 import socket
 import sys
 import threading
@@ -27,11 +22,6 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional
-
-try:
-    import anthropic
-except ImportError:
-    sys.exit("Missing dependency: pip install anthropic")
 
 
 # ─── Memory Address Table ────────────────────────────────────────────────────
@@ -335,12 +325,121 @@ TIERED_ITEMS = {
 GAMEPLAY_MODULES = {0x07, 0x09, 0x0A, 0x0B, 0x0E, 0x0F, 0x10}
 
 
+# ─── Sprite / Enemy Tables ───────────────────────────────────────────────────
+# Sprite table in WRAM: 16 slots (index 0-15), one byte per slot per property.
+# Positions are 16-bit, split across high/low byte tables.
+
+SPRITE_TABLE = {
+    "positions": (0x7E0D00, 64),   # Y_lo[16] X_lo[16] Y_hi[16] X_hi[16]
+    "states":    (0x7E0DD0, 16),   # sprite state (0 = inactive)
+    "types":     (0x7E0E20, 16),   # sprite type / enemy ID
+}
+
+# Sprite type IDs that are enemies.  Maps ID -> name.
+# Only entries here are treated as threats for proximity alerts.
+ENEMY_NAMES: dict[int, str] = {
+    # Overworld enemies
+    0x01: "Raven",
+    0x02: "Vulture",
+    0x08: "Octorok",
+    0x09: "Octorok",
+    0x0C: "Buzzblob",
+    0x0D: "Snapdragon",
+    0x0E: "Octoballoon",
+    0x10: "Hinox",
+    0x11: "Moblin",
+    0x12: "Mini Helmasaur",
+    0x15: "Antifairy",
+    0x18: "Mini Moldorm",
+    0x19: "Poe",
+    0x1A: "Leever",
+    0x23: "Red Bari",
+    0x24: "Blue Bari",
+    0x26: "Hardhat Beetle",
+    0x27: "Deadrock",
+    0x29: "Zora",
+    0x2B: "Pikit",
+    # Hyrule Castle / soldiers
+    0x41: "Soldier",
+    0x42: "Soldier",
+    0x43: "Soldier",
+    0x44: "Soldier",
+    0x45: "Soldier",
+    0x46: "Archer Soldier",
+    0x47: "Soldier",
+    0x48: "Soldier",
+    0x49: "Soldier",
+    0x4A: "Bomb Soldier",
+    # Dungeon enemies
+    0x53: "Armos",
+    0x58: "Crab",
+    0x81: "Ball and Chain Trooper",
+    0x83: "Green Eyegore",
+    0x84: "Red Eyegore",
+    0x85: "Stalfos",
+    0x86: "Kodongo",
+    0x8B: "Spike Trap",
+    0x90: "Wallmaster",
+    0x91: "Stalfos Knight",
+    0x9B: "Wizzrobe",
+    0xA5: "Firesnake",
+    0xA7: "Water Tektite",
+    # Bosses
+    0x54: "Armos Knight",
+    0x55: "Lanmola",
+    0x88: "Mothula",
+    0x92: "Helmasaur King",
+    0xCB: "Blind",
+    0xCE: "Vitreous",
+    0xD6: "Ganon",
+    0xD7: "Agahnim",
+}
+
+# Detection radius in pixels (16 px = 1 tile)
+ENEMY_DETECT_RADIUS = 112   # ~7 tiles
+
+
+@dataclass
+class Sprite:
+    """One entry from the SNES sprite table."""
+    index: int
+    type_id: int
+    state: int
+    x: int
+    y: int
+
+    @property
+    def is_active(self) -> bool:
+        return self.state != 0 and self.type_id != 0
+
+    @property
+    def is_enemy(self) -> bool:
+        return self.type_id in ENEMY_NAMES
+
+    @property
+    def name(self) -> str:
+        return ENEMY_NAMES.get(self.type_id, f"sprite {self.type_id:#04x}")
+
+
+def _direction_label(dx: int, dy: int) -> str:
+    """Compass direction from Link to a target.
+
+    Positive dy = target is south; positive dx = target is east.
+    """
+    if abs(dx) < 8 and abs(dy) < 8:
+        return "here"
+    ns = "north" if dy < 0 else ("south" if dy > 0 else "")
+    ew = "west" if dx < 0 else ("east" if dx > 0 else "")
+    return f"{ns}{ew}" if (ns or ew) else "here"
+
+
 # ─── Game State ───────────────────────────────────────────────────────────────
 
 @dataclass
 class GameState:
     """Snapshot of all watched ALttP memory values."""
     raw: dict[str, Optional[int]] = field(default_factory=dict)
+    sprites: list[Sprite] = field(default_factory=list)
     timestamp: float = 0.0
 
     def get(self, key: str, default: int = 0) -> int:
@@ -471,47 +570,36 @@ class GameState:
         ]
         return ". ".join(parts) + "."
 
-    def to_summary_dict(self) -> dict:
-        """Compact dict for Claude context."""
-        return {
-            "position": {
-                "x": self.get("link_x"),
-                "y": self.get("link_y"),
-                "direction": self.direction_name,
-            },
-            "location": {
-                "name": self.location_name,
-                "world": self.world_name,
-                "indoors": self.is_indoors,
-                "ow_screen": self.get("ow_screen"),
-                "dungeon_room": self.get("dungeon_room"),
-                "floor": self.get("floor"),
-            },
-            "health": {
-                "current": self.hp_hearts,
-                "max": self.max_hp_hearts,
-                "magic": self.get("magic"),
-            },
-            "resources": {
-                "rupees": self.get("rupees"),
-                "bombs": self.get("bombs"),
-                "arrows": self.get("arrows"),
-                "keys": self.get("keys"),
-            },
-            "equipment": {
-                "sword": SWORD_NAMES.get(self.get("sword"), "unknown"),
-                "shield": SHIELD_NAMES.get(self.get("shield"), "unknown"),
-                "armor": ARMOR_NAMES.get(self.get("armor"), "unknown"),
-                "gloves": GLOVE_NAMES.get(self.get("gloves"), "unknown"),
-            },
-            "game_mode": MODULE_NAMES.get(self.get("main_module"), "unknown"),
-            "link_state": LINK_STATE_NAMES.get(self.get("link_state"), "unknown"),
-            "progress": {
-                "pendants": self.get("pendants"),
-                "crystals": self.get("crystals"),
-                "progress_indicator": self.get("progress"),
-            },
-        }
+    def nearby_enemies(self, radius: int = ENEMY_DETECT_RADIUS) -> list[dict]:
+        """Return active enemies within *radius* pixels of Link, sorted by distance."""
+        link_x = self.get("link_x")
+        link_y = self.get("link_y")
+        result: list[dict] = []
+        r_sq = radius * radius
+        for s in self.sprites:
+            if not s.is_active or not s.is_enemy:
+                continue
+            dx = s.x - link_x
+            dy = s.y - link_y
+            dist_sq = dx * dx + dy * dy
+            if dist_sq <= r_sq:
+                result.append({
+                    "index": s.index,
+                    "type_id": s.type_id,
+                    "name": s.name,
+                    "distance": int(dist_sq ** 0.5),
+                    "direction": _direction_label(dx, dy),
+                })
+        result.sort(key=lambda e: e["distance"])
+        return result
+
+    def format_enemies(self) -> str:
+        enemies = self.nearby_enemies()
+        if not enemies:
+            return "No enemies nearby."
+        parts = [f"{e['name']} to the {e['direction']}" for e in enemies]
+        return "Nearby: " + ", ".join(parts) + "."
+
 
 
 # ─── Events ──────────────────────────────────────────────────────────────────
@@ -703,6 +791,29 @@ class EventDetector:
             events.append(Event("SWIMMING", EventPriority.LOW,
                                 "Exited water."))
 
+        # Dialog / text box appeared
+        if curr_mod == 0x0E and prev_mod != 0x0E:
+            events.append(Event(
+                "DIALOG", EventPriority.MEDIUM,
+                "Text appeared on screen.",
+            ))
+
+        # Enemy proximity
+        if curr_mod in GAMEPLAY_MODULES:
+            curr_nearby = curr.nearby_enemies()
+            prev_nearby = prev.nearby_enemies()
+            curr_set = {(e["index"], e["type_id"]) for e in curr_nearby}
+            prev_set = {(e["index"], e["type_id"]) for e in prev_nearby}
+
+            new_ids = curr_set - prev_set
+            if new_ids:
+                for e in curr_nearby:
+                    if (e["index"], e["type_id"]) in new_ids:
+                        events.append(Event(
+                            "ENEMY_NEARBY", EventPriority.HIGH,
+                            f"{e['name']} to the {e['direction']}!",
+                        ))
+
         return events
 
 
@@ -763,120 +874,51 @@ def read_memory(ra: RetroArchClient) -> GameState:
             raw[name] = int.from_bytes(data, "little") if length <= 4 else int.from_bytes(data, "little")
         else:
             raw[name] = None
-    return GameState(raw=raw, timestamp=time.time())
+
+    # Read sprite table (3 bulk reads: positions, states, types)
+    sprites: list[Sprite] = []
+    pos_addr, pos_len = SPRITE_TABLE["positions"]
+    st_addr,  st_len  = SPRITE_TABLE["states"]
+    ty_addr,  ty_len  = SPRITE_TABLE["types"]
+
+    pos_data = ra.read_core_memory(pos_addr, pos_len)
+    st_data  = ra.read_core_memory(st_addr,  st_len)
+    ty_data  = ra.read_core_memory(ty_addr,  ty_len)
+
+    if pos_data and st_data and ty_data:
+        for i in range(16):
+            y = pos_data[i] | (pos_data[32 + i] << 8)
+            x = pos_data[16 + i] | (pos_data[48 + i] << 8)
+            sprites.append(Sprite(
+                index=i,
+                type_id=ty_data[i],
+                state=st_data[i],
+                x=x,
+                y=y,
+            ))
+
+    return GameState(raw=raw, sprites=sprites, timestamp=time.time())
 
 
-# ─── Claude Bridge ────────────────────────────────────────────────────────────
 
-# Events that trigger Claude narration (others are local-only)
-CLAUDE_EVENTS = {
-    "ROOM_CHANGE",
-    "WORLD_TRANSITION",
-    "DUNGEON_ENTER_EXIT",
-    "PROGRESS_MILESTONE",
-    "BOSS_VICTORY",
-}
+# ─── Screen-Reader Output ─────────────────────────────────────────────────────
+# All user-facing output goes through _say() so it is clean for screen readers:
+#   - one complete thought per line
+#   - no decorative brackets, box-drawing, or emoji
+#   - immediate flush so the reader picks it up right away
 
-SYSTEM_PROMPT = (
-    "You are an accessibility guide for a blind player playing "
-    "The Legend of Zelda: A Link to the Past on SNES.\n\n"
-    "Your role:\n"
-    "- Describe the game world spatially so the player can navigate.\n"
-    "- When the player enters a new area, briefly describe what is there, "
-    "what dangers to expect, and which directions lead somewhere.\n"
-    "- Give concise, actionable guidance. No visual descriptions of colors "
-    "or graphics -- focus on spatial layout, enemies, items, and navigation.\n"
-    "- When the player asks a question, answer based on your knowledge of "
-    "ALttP and the current game state provided.\n"
-    "- Keep responses short (2-4 sentences typically). The player is using "
-    "a screen reader so brevity matters.\n"
-    "- Never use emojis. Plain text only.\n"
-    "- You receive game state as JSON with position, location, health, "
-    "inventory, and recent events. Use this to give context-aware guidance."
-)
-
-
-class ClaudeBridge:
-    """Calls Claude for contextual narration on game events and player questions."""
-
-    def __init__(self, model: str = "claude-sonnet-4-20250514",
-                 max_tokens: int = 300):
-        self.client = anthropic.Anthropic()
-        self.model = model
-        self.max_tokens = max_tokens
-        self.conversation: list[dict] = []
-        self.last_call_time: float = 0.0
-        self.min_interval: float = 3.0
-        self._lock = threading.Lock()
-
-    def call(self, prompt: str, game_state: GameState,
-             events: Optional[list[Event]] = None,
-             prefix: str = "[Guide]") -> Optional[str]:
-        """Call Claude with game context. Streams output to stdout.
-
-        Thread-safe: only one call at a time via internal lock.
-        """
-        with self._lock:
-            return self._call_locked(prompt, game_state, events, prefix)
-
-    def _call_locked(self, prompt: str, game_state: GameState,
-                     events: Optional[list[Event]],
-                     prefix: str) -> Optional[str]:
-        # Rate limit
-        elapsed = time.time() - self.last_call_time
-        if elapsed < self.min_interval:
-            time.sleep(self.min_interval - elapsed)
-
-        # Build context message
-        context_parts = []
-        if events:
-            event_list = [{"kind": e.kind, "message": e.message} for e in events]
-            context_parts.append(
-                f"[Recent Events]\n{json.dumps(event_list, indent=2)}")
-        context_parts.append(
-            f"[Game State]\n{json.dumps(game_state.to_summary_dict(), indent=2)}")
-        if prompt:
-            context_parts.append(f"[Player]\n{prompt}")
-
-        user_msg = {"role": "user", "content": "\n\n".join(context_parts)}
-        self.conversation.append(user_msg)
-        trimmed = self.conversation[-20:]
-
-        full_response: list[str] = []
-        print(f"\n{prefix} ", end="", flush=True)
-
-        try:
-            with self.client.messages.stream(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                system=SYSTEM_PROMPT,
-                messages=trimmed,
-            ) as stream:
-                for text in stream.text_stream:
-                    print(text, end="", flush=True)
-                    full_response.append(text)
-        except Exception as e:
-            print(f"(Claude error: {e})", flush=True)
-            self.last_call_time = time.time()
-            return None
-
-        response_text = "".join(full_response)
-        print(flush=True)
-
-        self.conversation.append({"role": "assistant", "content": response_text})
-        self.last_call_time = time.time()
-        return response_text
+def _say(text: str) -> None:
+    """Print a single line of output suitable for a screen reader."""
+    print(text, flush=True)
 
 
 # ─── Memory Poller (Background Thread) ────────────────────────────────────────
 
 class MemoryPoller:
-    """Polls emulator memory at ~4 Hz, detects events, triggers output."""
+    """Polls emulator memory at ~4 Hz, detects events, prints output."""
 
-    def __init__(self, ra: RetroArchClient, bridge: ClaudeBridge,
-                 poll_hz: float = 4.0):
+    def __init__(self, ra: RetroArchClient, poll_hz: float = 4.0):
         self.ra = ra
-        self.bridge = bridge
         self.poll_interval = 1.0 / poll_hz
         self.detector = EventDetector()
         self._state: Optional[GameState] = None
@@ -918,16 +960,16 @@ class MemoryPoller:
                 module = new_state.get("main_module")
                 if not self._initial_report_done and module in (0x07, 0x09):
                     self._initial_report_done = True
-                    print(f"\n[Info] Connected. {new_state.world_name}, "
-                          f"{new_state.location_name}.")
-                    print(f"[Info] {new_state.format_health()}. "
-                          f"Facing {new_state.direction_name}.", flush=True)
+                    _say(f"Game found. {new_state.world_name}, "
+                         f"{new_state.location_name}.")
+                    _say(f"{new_state.format_health()}. "
+                         f"Facing {new_state.direction_name}.")
 
                 # Detect events
                 if prev_state is not None:
                     events = self.detector.detect(prev_state, new_state)
-                    if events:
-                        self._handle_events(events, new_state)
+                    for event in events:
+                        _say(event.message)
 
                 prev_state = new_state
 
@@ -936,92 +978,70 @@ class MemoryPoller:
 
             time.sleep(self.poll_interval)
 
-    def _handle_events(self, events: list[Event], state: GameState):
-        """Route events to local output or Claude narration."""
-        local_events: list[Event] = []
-        claude_events: list[Event] = []
 
-        for event in events:
-            if event.kind in CLAUDE_EVENTS:
-                claude_events.append(event)
-            else:
-                local_events.append(event)
+# ─── Commands ─────────────────────────────────────────────────────────────────
 
-        # Print local events immediately
-        for event in local_events:
-            if event.priority == EventPriority.HIGH:
-                print(f"\n[Alert] {event.message}", flush=True)
-            else:
-                print(f"\n[Info] {event.message}", flush=True)
+_NO_STATE = "No game state available yet."
 
-        # Batch Claude events into one narration call
-        if claude_events:
-            for event in claude_events:
-                print(f"\n[Info] {event.message}", flush=True)
-            self.bridge.call("", state, claude_events)
+COMMANDS: dict[str, str] = {
+    "pos":      "Current position, room, and direction",
+    "health":   "Health, magic, and resources",
+    "items":    "Equipment and inventory",
+    "enemies":  "Nearby enemies and directions",
+    "progress": "Pendants, crystals, and progress",
+    "status":   "RetroArch connection status",
+    "help":     "List available commands",
+    "quit":     "Exit the program",
+}
 
 
-# ─── Slash Commands ───────────────────────────────────────────────────────────
+def handle_command(cmd: str, poller: MemoryPoller,
+                   ra: RetroArchClient) -> bool:
+    """Handle a command. Returns True if recognized."""
+    cmd = cmd.strip().lower().lstrip("/")
 
-def handle_slash_command(cmd: str, poller: MemoryPoller,
-                         ra: RetroArchClient) -> bool:
-    """Handle a slash command. Returns True if the command was recognized."""
-    cmd = cmd.strip().lower()
-
-    if cmd == "/pos":
+    if cmd == "pos":
         state = poller.get_state()
-        if state:
-            print(f"[Info] {state.format_position()}")
-        else:
-            print("[Info] No game state available yet.")
+        _say(state.format_position() if state else _NO_STATE)
         return True
 
-    if cmd == "/health":
+    if cmd == "health":
         state = poller.get_state()
-        if state:
-            print(f"[Info] {state.format_resources()}")
-        else:
-            print("[Info] No game state available yet.")
+        _say(state.format_resources() if state else _NO_STATE)
         return True
 
-    if cmd == "/items":
+    if cmd == "items":
         state = poller.get_state()
         if state:
-            print(f"[Info] {state.format_equipment()}")
-            print(f"[Info] {state.format_inventory()}")
+            _say(state.format_equipment())
+            _say(state.format_inventory())
         else:
-            print("[Info] No game state available yet.")
+            _say(_NO_STATE)
         return True
 
-    if cmd == "/progress":
+    if cmd == "enemies":
         state = poller.get_state()
-        if state:
-            print(f"[Info] {state.format_progress()}")
-        else:
-            print("[Info] No game state available yet.")
+        _say(state.format_enemies() if state else _NO_STATE)
         return True
 
-    if cmd == "/status":
+    if cmd == "progress":
+        state = poller.get_state()
+        _say(state.format_progress() if state else _NO_STATE)
+        return True
+
+    if cmd == "status":
         status = ra.get_status()
         version = ra.get_version()
-        if status:
-            print(f"[Info] RetroArch status: {status}")
-        else:
-            print("[Info] RetroArch: no response (not connected or game not running).")
+        _say(f"RetroArch status: {status}" if status
+             else "RetroArch not responding.")
         if version:
-            print(f"[Info] RetroArch version: {version}")
+            _say(f"RetroArch version: {version}")
         return True
 
-    if cmd == "/help":
-        print("[Info] Commands:")
-        print("  /pos      - Current position, room, direction")
-        print("  /health   - Health, magic, resources")
-        print("  /items    - Equipment and inventory")
-        print("  /progress - Pendants, crystals, progress")
-        print("  /status   - RetroArch connection status")
-        print("  /help     - This help message")
-        print("  /quit     - Exit")
-        print("  (Type anything else to ask the guide a question)")
+    if cmd == "help":
+        _say("Available commands:")
+        for name, desc in COMMANDS.items():
+            _say(f"  {name} - {desc}")
         return True
 
     return False
@@ -1031,91 +1051,80 @@ def handle_slash_command(cmd: str, poller: MemoryPoller,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="ALttP Accessibility Bridge - Screen-reader-friendly game guide",
+        description="ALttP Accessibility Bridge - screen-reader-friendly game events",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 A Link to the Past accessibility bridge that polls emulator memory,
-detects game events, and provides screen-reader-friendly narration.
+detects game events, and provides screen-reader-friendly output.
 
 Examples:
   python bridge.py
   python bridge.py --port 55356
-  python bridge.py --model claude-sonnet-4-20250514
 """,
     )
     parser.add_argument("--host", default="127.0.0.1",
                         help="RetroArch host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=55355,
                         help="RetroArch UDP port (default: 55355)")
-    parser.add_argument("--model", default="claude-sonnet-4-20250514",
-                        help="Claude model to use")
     parser.add_argument("--poll-hz", type=float, default=4.0,
                         help="Memory poll rate in Hz (default: 4)")
     args = parser.parse_args()
-
-    # Check API key
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("[Error] Set ANTHROPIC_API_KEY environment variable first.")
-        print("  export ANTHROPIC_API_KEY=sk-ant-...")
-        sys.exit(1)
 
     # Connect to RetroArch
     ra = RetroArchClient(host=args.host, port=args.port)
     ra.connect()
 
-    print("[Info] Testing RetroArch connection...")
-    version = ra.get_version()
-    if version:
-        print(f"[Info] RetroArch version: {version}")
-    else:
-        print("[Info] No response from RetroArch. Make sure:")
-        print("  1. RetroArch is running with A Link to the Past loaded")
-        print('  2. network_cmd_enable = "true" in retroarch.cfg')
-        print("  Continuing anyway -- will poll until connected.")
+    _say("Connecting to RetroArch.")
+    while True:
+        version = ra.get_version()
+        if version:
+            _say(f"Connected. RetroArch version {version}.")
+            break
+        _say("No response from RetroArch. "
+             "Make sure RetroArch is running with A Link to the Past loaded "
+             "and network commands are enabled in retroarch.cfg.")
+        _say("Retrying in 5 seconds. Press Control C to quit.")
+        try:
+            time.sleep(5)
+        except KeyboardInterrupt:
+            ra.close()
+            _say("Goodbye.")
+            sys.exit(0)
 
     status = ra.get_status()
     if status:
-        print(f"[Info] Status: {status}")
+        _say(f"Status: {status}")
 
-    # Start bridge and poller
-    bridge = ClaudeBridge(model=args.model)
-    poller = MemoryPoller(ra, bridge, poll_hz=args.poll_hz)
+    # Start poller
+    poller = MemoryPoller(ra, poll_hz=args.poll_hz)
     poller.start()
 
-    print("[Info] ALttP Accessibility Bridge started.")
-    print("[Info] Type /help for commands, or ask the guide a question.")
+    _say("ALttP Accessibility Bridge started. Type help for commands.")
 
     try:
         while True:
             try:
-                user_input = input("[You] ").strip()
+                user_input = input("> ").strip()
             except EOFError:
                 break
 
             if not user_input:
                 continue
 
-            if user_input == "/quit":
+            if user_input.lower() in ("quit", "/quit"):
                 break
 
-            if user_input.startswith("/"):
-                if handle_slash_command(user_input, poller, ra):
-                    continue
-                print("[Info] Unknown command. Type /help for a list.")
+            if handle_command(user_input, poller, ra):
                 continue
 
-            # Player question -- send to Claude with current game state
-            state = poller.get_state()
-            if state is None:
-                state = GameState()
-            bridge.call(user_input, state, prefix="[Guide]")
+            _say(f"Unknown command: {user_input}. Type help for a list.")
 
     except KeyboardInterrupt:
-        print("\n[Info] Interrupted.")
+        _say("Interrupted.")
     finally:
         poller.stop()
         ra.close()
-        print("[Info] Goodbye.")
+        _say("Goodbye.")
 
 
 if __name__ == "__main__":
