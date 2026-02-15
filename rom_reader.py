@@ -1420,11 +1420,11 @@ def _parse_dialog_strings(rom: bytes, offset: int) -> list[str]:
 
 # ─── Main Entry Point ────────────────────────────────────────────────────────
 
-def load_rom(path: str) -> Optional[RomData]:
+def load_rom(path: str, verbose: bool = False) -> Optional[RomData]:
     """Load and parse an ALttP ROM file.
 
     Returns RomData with all parsed room data, or None if the ROM
-    is invalid or cannot be read.
+    is invalid or cannot be read.  Set *verbose* to print progress.
     """
     rom_path = Path(path)
     if not rom_path.exists():
@@ -1440,44 +1440,52 @@ def load_rom(path: str) -> Optional[RomData]:
 
     # Validate ROM title
     if not _validate_title(rom, header_size):
-        print(f"Warning: ROM title does not match expected '{EXPECTED_TITLE}'.")
-        print("Proceeding anyway, but data may be incorrect.")
+        if verbose:
+            print(f"Warning: ROM title does not match expected '{EXPECTED_TITLE}'.")
+            print("Proceeding anyway, but data may be incorrect.")
 
     offset = header_size
 
     # Parse room headers
     headers = _parse_room_headers(rom, offset)
-    print(f"Parsed {len(headers)} room headers.")
+    if verbose:
+        print(f"Parsed {len(headers)} room headers.")
 
     # Parse room sprites
     sprites = _parse_room_sprites(rom, offset)
-    sprite_count = sum(len(v) for v in sprites.values())
-    print(f"Parsed sprites for {len(sprites)} rooms ({sprite_count} total sprites).")
+    if verbose:
+        sprite_count = sum(len(v) for v in sprites.values())
+        print(f"Parsed sprites for {len(sprites)} rooms ({sprite_count} total sprites).")
 
     # Parse room objects/doors (with graceful fallback)
     try:
         objects_doors = _parse_room_objects(rom, offset)
-        obj_count = sum(len(o) for o, _ in objects_doors.values())
-        door_count = sum(len(d) for _, d in objects_doors.values())
-        print(f"Parsed objects for {len(objects_doors)} rooms "
-              f"({obj_count} objects, {door_count} doors).")
+        if verbose:
+            obj_count = sum(len(o) for o, _ in objects_doors.values())
+            door_count = sum(len(d) for _, d in objects_doors.values())
+            print(f"Parsed objects for {len(objects_doors)} rooms "
+                  f"({obj_count} objects, {door_count} doors).")
     except Exception as e:
-        print(f"Warning: Room object parsing failed ({e}). "
-              "Door/object data will not be available.")
+        if verbose:
+            print(f"Warning: Room object parsing failed ({e}). "
+                  "Door/object data will not be available.")
         objects_doors = {}
 
     # Parse overworld sprites
     ow_sprites = _parse_ow_sprites(rom, offset)
-    ow_count = sum(len(v) for v in ow_sprites.values())
-    print(f"Parsed overworld sprites for {len(ow_sprites)} screens ({ow_count} total).")
+    if verbose:
+        ow_count = sum(len(v) for v in ow_sprites.values())
+        print(f"Parsed overworld sprites for {len(ow_sprites)} screens ({ow_count} total).")
 
     # Parse dialog text
     try:
         dialog_strings = _parse_dialog_strings(rom, offset)
-        print(f"Parsed {len(dialog_strings)} dialog strings.")
+        if verbose:
+            print(f"Parsed {len(dialog_strings)} dialog strings.")
     except Exception as e:
-        print(f"Warning: Dialog parsing failed ({e}). "
-              "Dialog text will not be available from ROM.")
+        if verbose:
+            print(f"Warning: Dialog parsing failed ({e}). "
+                  "Dialog text will not be available from ROM.")
         dialog_strings = []
 
     # Assemble RoomData for each room
@@ -1507,11 +1515,13 @@ def load_rom(path: str) -> Optional[RomData]:
         map16_to_map8 = list(struct.unpack_from(
             f"<{_MAP16_TO_MAP8_COUNT}H", m16_data))
         map8_to_tileattr = rom[m8_off:m8_off + _MAP8_TO_TILEATTR_COUNT]
-        print(f"Loaded tile attribute tables "
-              f"(map16→map8: {len(map16_to_map8)}, "
-              f"map8→attr: {len(map8_to_tileattr)}).")
+        if verbose:
+            print(f"Loaded tile attribute tables "
+                  f"(map16→map8: {len(map16_to_map8)}, "
+                  f"map8→attr: {len(map8_to_tileattr)}).")
     except Exception as e:
-        print(f"Warning: Tile attribute table extraction failed ({e}).")
+        if verbose:
+            print(f"Warning: Tile attribute table extraction failed ({e}).")
 
     return RomData(room_data=room_data, ow_sprites=ow_sprites,
                    dialog_strings=dialog_strings,
