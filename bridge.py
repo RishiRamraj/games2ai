@@ -1684,8 +1684,8 @@ class ProximityTracker:
     tracking on room change.
     """
 
-    APPROACH_DIST = 112  # ~14 tiles
-    NEARBY_DIST = 64     # ~8 tiles
+    APPROACH_DIST = 96   # ~12 tiles
+    NEARBY_DIST = 56     # ~7 tiles
 
     # Exact door tile positions from zelda3 kDoorPositionToTilemapOffs tables.
     # Key: (direction, position), Value: (x_tile, y_tile) in the 64×64 room grid.
@@ -1766,6 +1766,8 @@ class ProximityTracker:
         ],
     }
 
+    _AREA_CHANGE_COOLDOWN = 2.0  # seconds to suppress zone 1 + cone after area change
+
     def __init__(self, ra: Optional['RetroArchClient'] = None) -> None:
         self._ra = ra
         self._current_room: int = -1
@@ -1774,6 +1776,7 @@ class ProximityTracker:
         self._doorway_features: list[tuple[str, int, int, str]] = []
         self._last_cone: str = ""  # last announced cone description
         self._last_direction: int = -1  # track Link's facing direction
+        self._area_change_time: float = 0.0  # timestamp of last area transition
 
     def _zone_transition(self, obj: TrackedObject, dist: float,
                          direction: str, link_dir_name: Optional[str],
@@ -1790,26 +1793,26 @@ class ProximityTracker:
         event: Optional[Event] = None
 
         if is_facing and prev_zone != "facing":
-            msg = f"Facing {obj.name}."
+            msg = f"Facing {obj.name.capitalize()}."
             event = Event("FACING", EventPriority.MEDIUM, msg, diag)
             obj.zone = "facing"
         elif dist <= self.NEARBY_DIST and prev_zone not in ("nearby", "facing"):
-            msg = f"{obj.name} nearby to the {direction}."
+            msg = f"{obj.name.capitalize()} nearby to the {direction}."
             event = Event("PROXIMITY", EventPriority.MEDIUM, msg, diag)
             obj.zone = "nearby"
         elif dist <= self.APPROACH_DIST and prev_zone is None:
-            msg = f"Approaching {obj.name} to the {direction}."
+            msg = f"Approaching {obj.name.capitalize()} to the {direction}."
             # Add velocity info for dynamic sprites
             if obj.is_dynamic:
                 speed = (obj.vx ** 2 + obj.vy ** 2) ** 0.5
                 if speed > ObjectTracker._SPEED_THRESHOLD:
                     from_dir = _direction_label(-int(obj.vx), -int(obj.vy))
-                    msg = (f"Approaching {obj.name} to the {direction}, "
+                    msg = (f"Approaching {obj.name.capitalize()} to the {direction}, "
                            f"moving from the {from_dir}.")
             event = Event("PROXIMITY", EventPriority.LOW, msg, diag)
             obj.zone = "approach"
 
-        # Reset facing when Link turns away
+        # Downgrade zone when object drifts outward, so re-entry re-alerts
         if prev_zone == "facing" and not is_facing:
             if dist <= self.NEARBY_DIST:
                 obj.zone = "nearby"
@@ -1817,9 +1820,12 @@ class ProximityTracker:
                 obj.zone = "approach"
             else:
                 obj.zone = None
-
-        # Reset zone when object leaves approach range
-        if dist > self.APPROACH_DIST and prev_zone is not None:
+        elif prev_zone == "nearby" and dist > self.NEARBY_DIST:
+            if dist <= self.APPROACH_DIST:
+                obj.zone = "approach"
+            else:
+                obj.zone = None
+        elif dist > self.APPROACH_DIST and prev_zone is not None:
             obj.zone = None
 
         return event
@@ -1840,6 +1846,7 @@ class ProximityTracker:
             if room_id != self._current_room:
                 self._current_room = room_id
                 self._tracker.clear()
+                self._area_change_time = now
                 # Scan WRAM tilemap for implicit doorway tiles
                 if self._ra:
                     self._doorway_features = self._scan_doorways(
@@ -1853,6 +1860,7 @@ class ProximityTracker:
             if ow_screen is not None and ow_screen != self._current_ow_screen:
                 self._current_ow_screen = ow_screen
                 self._tracker.clear()
+                self._area_change_time = now
             if ow_screen is not None:
                 features = self._get_ow_features(state.rom_data, ow_screen)
 
@@ -1863,6 +1871,7 @@ class ProximityTracker:
 
         events: list[Event] = []
         link_dir_name = DIRECTION_NAMES.get(state.get("direction"))
+        in_cooldown = (now - self._area_change_time) < self._AREA_CHANGE_COOLDOWN
 
         # Process all tracked objects (static + dynamic) through zone state machine
         for obj in self._tracker.all_objects():
@@ -1879,6 +1888,10 @@ class ProximityTracker:
             event = self._zone_transition(obj, dist, direction,
                                           link_dir_name, is_facing)
             if event:
+                # During cooldown, suppress zone 1 events (nearby/facing)
+                if in_cooldown and event.kind in ("FACING", "PROXIMITY"):
+                    if obj.zone in ("nearby", "facing"):
+                        continue
                 events.append(event)
 
         # Reset cone cache when Link turns (direction change = new scan)
@@ -1887,14 +1900,21 @@ class ProximityTracker:
             self._last_direction = direction
             self._last_cone = ""
 
-        # Tile-cone scan: describe the closest interesting static tile in a
-        # 45° cone 4 tiles ahead of Link's facing direction.
-        cone_msg = self._scan_cone(state)
-        if cone_msg and cone_msg != self._last_cone:
-            events.append(Event("CONE_TILE", EventPriority.LOW, cone_msg))
-            self._last_cone = cone_msg
+        # Tile-cone scan (suppressed during area-change cooldown)
+        if not in_cooldown:
+            cone_msg = self._scan_cone(state)
+            if cone_msg and cone_msg != self._last_cone:
+                events.append(Event("CONE_TILE", EventPriority.LOW, cone_msg))
+                self._last_cone = cone_msg
 
-        return events
+        # De-duplicate by message text, preserving order
+        seen_msgs: set[str] = set()
+        unique: list[Event] = []
+        for e in events:
+            if e.message not in seen_msgs:
+                seen_msgs.add(e.message)
+                unique.append(e)
+        return unique
 
     def scan(self, state: GameState) -> list[str]:
         """List all features within approach range, sorted by distance."""
@@ -1926,7 +1946,7 @@ class ProximityTracker:
             dist = (dx * dx + dy * dy) ** 0.5
             if dist <= self.APPROACH_DIST:
                 direction = _direction_label(dx, dy)
-                results.append((dist, f"{desc} to the {direction}, "
+                results.append((dist, f"{desc.capitalize()} to the {direction}, "
                                       f"{int(dist)} pixels away."))
 
         # Dynamic sprites from tracker
@@ -1936,7 +1956,7 @@ class ProximityTracker:
             dist = (dx * dx + dy * dy) ** 0.5
             if dist <= self.APPROACH_DIST:
                 direction = _direction_label(dx, dy)
-                entry = (f"{obj.name} to the {direction}, "
+                entry = (f"{obj.name.capitalize()} to the {direction}, "
                          f"{int(dist)} pixels away")
                 speed = (obj.vx ** 2 + obj.vy ** 2) ** 0.5
                 if speed > ObjectTracker._SPEED_THRESHOLD:
@@ -1948,9 +1968,16 @@ class ProximityTracker:
         results.sort(key=lambda r: r[0])
         return [r[1] for r in results]
 
+    _CONE_IGNORE_TILES = frozenset({"diggable ground", "hookshot target"})
+
     def _scan_cone(self, state: GameState) -> str:
-        """Scan tiles in a 45° cone ahead of Link and return a short
-        description of the closest interesting tile, or empty string."""
+        """Scan tiles in a 45° cone ahead of Link and describe all visible
+        interactable tiles, with line-of-sight occlusion.
+
+        Reports every unobscured interactable tile/object from closest to
+        farthest.  A tile is obscured if any other solid tile in the cone
+        lies on the Bresenham line between Link and that tile.
+        """
         from rom_reader import TILE_TYPE_NAMES
 
         if not self._ra:
@@ -1973,6 +2000,15 @@ class ProximityTracker:
         ltx = (link_x + 8) >> 3   # centre of hitbox
         lty = (link_y + 12) >> 3
 
+        # Unit vector toward Link along the cone's primary axis
+        _CLOSER: dict[int, tuple[int, int]] = {
+            0: (0, 1), 2: (0, -1), 4: (1, 0), 6: (-1, 0),
+        }
+        closer = _CLOSER.get(direction, (0, 0))
+
+        # Phase 1: read all tiles in the cone, classify solid/interactable ones
+        solid: dict[tuple[int, int], str] = {}
+
         for ring in cone:
             for dx, dy in ring:
                 tx = ltx + dx
@@ -1984,14 +2020,88 @@ class ProximityTracker:
                     name = "wall"
                 else:
                     name = TILE_TYPE_NAMES.get(attr)
+                    if name in self._CONE_IGNORE_TILES:
+                        name = None
                 if name:
-                    # Describe position relative to centre of cone
-                    side = self._cone_side(direction, dx, dy)
-                    tiles = max(abs(dx), abs(dy))
-                    if side:
-                        return f"{name} {tiles} ahead, {side}."
-                    return f"{name} {tiles} ahead."
-        return ""
+                    # Ledges are detected late; place them one tile closer
+                    if name.startswith("ledge"):
+                        pos = (dx + closer[0], dy + closer[1])
+                        if pos != (0, 0):  # don't place on Link's tile
+                            solid[pos] = name
+                    else:
+                        solid[(dx, dy)] = name
+
+        # Phase 2: overlay tracked objects (ring 1/2 features + dynamic sprites)
+        # that fall within the cone — more specific labels override raw tiles
+        cone_set: set[tuple[int, int]] = set()
+        for ring in cone:
+            for dx, dy in ring:
+                cone_set.add((dx, dy))
+
+        for obj in self._tracker.all_objects():
+            obj_dx = (obj.world_x >> 3) - ltx
+            obj_dy = (obj.world_y >> 3) - lty
+            if (obj_dx, obj_dy) in cone_set:
+                solid[(obj_dx, obj_dy)] = obj.name
+
+        # Phase 3: occlusion — keep only tiles with clear line-of-sight
+        visible: list[tuple[int, str, str]] = []  # (distance, name, side)
+
+        for ring in cone:
+            for dx, dy in ring:
+                if (dx, dy) not in solid:
+                    continue
+                # Check if any solid tile on the line from Link to here blocks it
+                obscured = False
+                for cell in self._bresenham(0, 0, dx, dy):
+                    if cell in solid:
+                        obscured = True
+                        break
+                if obscured:
+                    continue
+                name = solid[(dx, dy)]
+                # Snap to pure cardinal (no diagonals) — pick dominant axis
+                if abs(dx) >= abs(dy):
+                    cardinal = "east" if dx > 0 else "west"
+                else:
+                    cardinal = "south" if dy > 0 else "north"
+                visible.append((name, cardinal))
+
+        if not visible:
+            return ""
+
+        seen: set[tuple[str, str]] = set()
+        parts: list[str] = []
+        for name, cardinal in visible:
+            if (name, cardinal) not in seen:
+                seen.add((name, cardinal))
+                parts.append(f"{name.capitalize()} to the {cardinal}")
+        return "; ".join(parts) + "."
+
+    @staticmethod
+    def _bresenham(x0: int, y0: int, x1: int, y1: int,
+                   ) -> list[tuple[int, int]]:
+        """Return cells on a Bresenham line, excluding both endpoints."""
+        cells: list[tuple[int, int]] = []
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        sx = 1 if x1 > x0 else (-1 if x1 < x0 else 0)
+        sy = 1 if y1 > y0 else (-1 if y1 < y0 else 0)
+        err = dx - dy
+        x, y = x0, y0
+        while True:
+            if (x, y) != (x0, y0) and (x, y) != (x1, y1):
+                cells.append((x, y))
+            if x == x1 and y == y1:
+                break
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x += sx
+            if e2 < dx:
+                err += dx
+                y += sy
+        return cells
 
     @staticmethod
     def _cone_side(direction: int, dx: int, dy: int) -> str:
@@ -2423,8 +2533,8 @@ class MapRenderer:
         passable = self._OVERLAY_PASSABLE
 
         # Convert pixel radii to tile units (8px per tile)
-        approach_r = ProximityTracker.APPROACH_DIST / 8.0  # ~14 tiles
-        nearby_r = ProximityTracker.NEARBY_DIST / 8.0      # ~8 tiles
+        approach_r = ProximityTracker.APPROACH_DIST / 8.0  # ~12 tiles
+        nearby_r = ProximityTracker.NEARBY_DIST / 8.0      # ~7 tiles
 
         # Draw radius rings (outermost first).  A cell is on a ring if
         # its distance from centre is within ±0.7 tiles of the radius.
