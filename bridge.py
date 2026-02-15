@@ -15,6 +15,8 @@ Setup:
 """
 
 import argparse
+import os
+import re
 import socket
 import sys
 import threading
@@ -103,7 +105,67 @@ MEMORY_MAP: dict[str, tuple[int, int]] = {
     "floor_level":      (0x7E00EE, 1),
     "trap_doors":       (0x7E0468, 1),
     "ganon_state":      (0x7E04C5, 1),
+
+    # Dialog
+    "dialog_id":        (0x7E012C, 2),
 }
+
+
+# ─── Text Dump ────────────────────────────────────────────────────────────────
+# Loads dialog messages from a text dump (text.txt) so that on-screen text
+# can be spoken by the screen reader.
+
+_CONTROL_CODE_RE = re.compile(r'\*[0-9A-Za-z]+')
+_GRAPHIC_RE = re.compile(r'\|[^|]*\|')
+
+
+def _clean_dialog_text(raw: str) -> str:
+    """Strip ALttP control codes for screen reader output."""
+    lines: list[str] = []
+    for line in raw.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        # Remove *XX control codes and |graphic| insertions
+        line = _CONTROL_CODE_RE.sub('', line)
+        line = _GRAPHIC_RE.sub('', line)
+        # Skip Hylian glyph-only lines
+        if all(c in '\u2020\u00a7\u00bb ' for c in line):
+            continue
+        # Remove leading telepathy/fortune/menu prefix (single char C/B/A)
+        if len(line) > 1 and line[0] in 'CBA' and line[1].isupper():
+            line = line[1:]
+        line = line.strip()
+        if line:
+            lines.append(line)
+    return ' '.join(lines)
+
+
+def load_text_dump(path: str) -> list[str]:
+    """Parse a text dump file into an ordered list of dialog messages."""
+    try:
+        with open(path) as f:
+            content = f.read()
+    except FileNotFoundError:
+        return []
+
+    # Skip header -- actual text starts after "The Text Dump" heading
+    marker = "The Text Dump"
+    idx = content.find(marker)
+    if idx >= 0:
+        rest = content[idx:]
+        nl = rest.find('\n\n')
+        content = rest[nl:] if nl >= 0 else rest
+
+    # Split on blank lines to separate individual messages
+    raw_messages = re.split(r'\n\s*\n', content.strip())
+
+    messages: list[str] = []
+    for raw in raw_messages:
+        cleaned = _clean_dialog_text(raw)
+        if cleaned:
+            messages.append(cleaned)
+    return messages
 
 
 # ─── Lookup Tables ────────────────────────────────────────────────────────────
@@ -629,6 +691,9 @@ _INVENTORY_KEYS = (
 class EventDetector:
     """Compares previous and current GameState to emit events."""
 
+    def __init__(self, dialog_messages: Optional[list[str]] = None):
+        self.dialog_messages = dialog_messages or []
+
     def detect(self, prev: GameState, curr: GameState) -> list[Event]:
         events: list[Event] = []
 
@@ -793,9 +858,13 @@ class EventDetector:
 
         # Dialog / text box appeared
         if curr_mod == 0x0E and prev_mod != 0x0E:
+            dialog_id = curr.get("dialog_id")
+            text = ""
+            if self.dialog_messages and 0 <= dialog_id < len(self.dialog_messages):
+                text = self.dialog_messages[dialog_id]
             events.append(Event(
                 "DIALOG", EventPriority.MEDIUM,
-                "Text appeared on screen.",
+                text if text else "Text appeared on screen.",
             ))
 
         # Enemy proximity
@@ -917,10 +986,11 @@ def _say(text: str) -> None:
 class MemoryPoller:
     """Polls emulator memory at ~4 Hz, detects events, prints output."""
 
-    def __init__(self, ra: RetroArchClient, poll_hz: float = 4.0):
+    def __init__(self, ra: RetroArchClient, poll_hz: float = 4.0,
+                 dialog_messages: Optional[list[str]] = None):
         self.ra = ra
         self.poll_interval = 1.0 / poll_hz
-        self.detector = EventDetector()
+        self.detector = EventDetector(dialog_messages)
         self._state: Optional[GameState] = None
         self._state_lock = threading.Lock()
         self._running = False
@@ -1068,7 +1138,18 @@ Examples:
                         help="RetroArch UDP port (default: 55355)")
     parser.add_argument("--poll-hz", type=float, default=4.0,
                         help="Memory poll rate in Hz (default: 4)")
+    parser.add_argument("--text", default=None,
+                        help="Path to ALttP text dump file (default: text.txt next to bridge.py)")
     args = parser.parse_args()
+
+    # Load dialog text dump
+    text_path = args.text or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "text.txt")
+    dialog_messages = load_text_dump(text_path)
+    if dialog_messages:
+        _say(f"Loaded {len(dialog_messages)} dialog messages from text dump.")
+    else:
+        _say("No text dump found. Dialog text will not be available.")
 
     # Connect to RetroArch
     ra = RetroArchClient(host=args.host, port=args.port)
@@ -1096,7 +1177,8 @@ Examples:
         _say(f"Status: {status}")
 
     # Start poller
-    poller = MemoryPoller(ra, poll_hz=args.poll_hz)
+    poller = MemoryPoller(ra, poll_hz=args.poll_hz,
+                          dialog_messages=dialog_messages)
     poller.start()
 
     _say("ALttP Accessibility Bridge started. Type help for commands.")
