@@ -1850,14 +1850,19 @@ Examples:
         else:
             _say("Failed to load ROM. Falling back to static descriptions.")
 
-    # Load dialog text dump
-    text_path = args.text or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "text.txt")
-    dialog_messages = load_text_dump(text_path)
-    if dialog_messages:
-        _say(f"Loaded {len(dialog_messages)} dialog messages from text dump.")
+    # Load dialog text: prefer ROM-extracted dialog, fall back to text dump
+    dialog_messages: list[str] = []
+    if rom_data and rom_data.dialog_strings:
+        dialog_messages = rom_data.dialog_strings
+        _say(f"Loaded {len(dialog_messages)} dialog messages from ROM.")
     else:
-        _say("No text dump found. Dialog text will not be available.")
+        text_path = args.text or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "text.txt")
+        dialog_messages = load_text_dump(text_path)
+        if dialog_messages:
+            _say(f"Loaded {len(dialog_messages)} dialog messages from text dump.")
+        else:
+            _say("No dialog text available. Provide a ROM with --rom for dialog support.")
 
     # Connect to RetroArch
     ra = RetroArchClient(host=args.host, port=args.port)
