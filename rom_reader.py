@@ -156,7 +156,7 @@ SPRITE_TYPE_NAMES: dict[int, tuple[str, str]] = {
     0x67: ("Wall cannon (horizontal)", SpriteCategory.HAZARD),
     0x68: ("Ball and Chain Trooper", SpriteCategory.ENEMY),
     0x69: ("Cannon Soldier", SpriteCategory.ENEMY),
-    0x6A: ("Mirror Portal", SpriteCategory.OBJECT),
+    0x6A: ("Ball and Chain Trooper", SpriteCategory.ENEMY),
     0x6B: ("Rat", SpriteCategory.ENEMY),
     0x6C: ("Rope", SpriteCategory.ENEMY),
     0x6D: ("Keese", SpriteCategory.ENEMY),
@@ -167,7 +167,7 @@ SPRITE_TYPE_NAMES: dict[int, tuple[str, str]] = {
     0x72: ("Running Man", SpriteCategory.NPC),
     0x73: ("Bottle Vendor", SpriteCategory.NPC),
     0x74: ("Princess Zelda", SpriteCategory.NPC),
-    0x76: ("Old Man (cave)", SpriteCategory.NPC),
+    0x76: ("Zelda", SpriteCategory.NPC),
     0x77: ("Pipe Down", SpriteCategory.OBJECT),
     0x78: ("Pipe Up", SpriteCategory.OBJECT),
     0x79: ("Pipe Right", SpriteCategory.OBJECT),
@@ -627,7 +627,7 @@ class RoomData:
         groups: dict[str, list[str]] = {}
         for obj in self.objects:
             cat = obj.category
-            if cat != "feature":  # Skip generic floor/wall
+            if cat:
                 groups.setdefault(cat, []).append(obj.name)
         return groups
 
@@ -687,7 +687,7 @@ class RoomData:
 
         # Features from objects
         obj_groups = self._get_object_groups()
-        feature_cats = ("chest", "stairs", "switch", "torch", "block", "interactable")
+        feature_cats = ("chest", "stairs", "switch", "torch", "block", "interactable", "feature")
         feature_parts = []
         for cat in feature_cats:
             if cat in obj_groups:
@@ -734,12 +734,12 @@ class RoomData:
 
 TILE_TYPE_NAMES: dict[int, str] = {
     0x01: "wall", 0x02: "wall", 0x03: "wall",
-    0x04: "thick grass",
+    0x04: "thick grass",  # indoor: wall (handled in bridge.py)
     0x08: "deep water", 0x09: "shallow water",
     0x0A: "water ladder",
     0x0D: "spike floor",
     0x0E: "ice floor", 0x0F: "ice floor",
-    0x1C: "water staircase",
+    0x1C: "ledge",
     0x1D: "stairs", 0x1E: "stairs", 0x1F: "stairs",
     0x20: "pit",
     0x22: "stairs",
@@ -794,8 +794,8 @@ class RomData:
         """Look up the overworld tile attribute for a map16 tile.
 
         *map16_index* comes from the WRAM overworld_tileattr table at
-        $7E:2000.  *x* and *y* are Link's pixel coordinates (only the
-        low bits are used to select the sub-tile within the map16 cell).
+        $7E:2000.  *x* is in 8-px tile units, *y* in pixel units (only
+        the low bits select the sub-tile within the map16 cell).
 
         Returns the tile attribute byte (see TILE_TYPE_NAMES).
         """

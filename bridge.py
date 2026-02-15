@@ -101,6 +101,9 @@ MEMORY_MAP: dict[str, tuple[int, int]] = {
     "magic_cape":       (0x7EF355, 1),
     "mirror":           (0x7EF356, 1),
 
+    # Input
+    "joypad_dir":       (0x7E00F0, 1),  # joypad1H_last: directional bits 0-3
+
     # Status
     "link_state":       (0x7E005D, 1),
     "damage_timer":     (0x7E0046, 1),
@@ -705,8 +708,8 @@ ENEMY_NAMES: dict[int, str] = {
     0x4A: "Green Bomb Soldier",
     # Dungeon enemies
     0x53: "Armos",
+    0x6A: "Ball and Chain Trooper",
     0x58: "Crab",
-    0x81: "Ball and Chain Trooper",
     0x83: "Green Eyegore",
     0x84: "Red Eyegore",
     0x85: "Stalfos",
@@ -820,12 +823,18 @@ class GameState:
     def max_hp_hearts(self) -> float:
         return self.get("max_hp") / 8.0
 
+    # Tiles that act as walls indoors but have different meaning outdoors
+    # (from zelda3 tile_detect.c TileDetect_ExecuteInner)
+    _INDOOR_WALL_TILES = {0x04, 0x0B, 0x6C, 0x6D, 0x6E, 0x6F}
+
     @property
     def facing_tile_name(self) -> Optional[str]:
         """Human name for the tile Link is facing, or None if passable."""
         from rom_reader import TILE_TYPE_NAMES
         if self.facing_tile < 0:
             return None
+        if self.get("indoors") and self.facing_tile in self._INDOOR_WALL_TILES:
+            return "wall"
         return TILE_TYPE_NAMES.get(self.facing_tile)
 
     @property
@@ -1100,6 +1109,8 @@ class EventDetector:
                  rom_data: Optional[RomData] = None):
         self.dialog_messages = dialog_messages or []
         self.rom_data = rom_data
+        self._blocked_count: int = 0
+        self._blocked_announced: bool = False
 
     def detect(self, prev: GameState, curr: GameState) -> list[Event]:
         events: list[Event] = []
@@ -1340,14 +1351,38 @@ class EventDetector:
                         ))
 
         # Facing-tile change: announce when Link faces a new interactable tile
+        # Some tiles are only relevant when the matching item is equipped.
         if curr_mod in GAMEPLAY_MODULES:
             curr_tile = curr.facing_tile_name
             prev_tile = prev.facing_tile_name
             if curr_tile and curr_tile != prev_tile:
-                events.append(Event(
-                    "FACING_TILE", EventPriority.LOW,
-                    f"Facing {curr_tile}.",
-                ))
+                skip = False
+                if curr_tile == "diggable ground" and curr.get("flute_shovel") != 1:
+                    skip = True
+                if curr_tile == "hookshot target" and not curr.get("hookshot"):
+                    skip = True
+                if not skip:
+                    events.append(Event(
+                        "FACING_TILE", EventPriority.LOW,
+                        f"Facing {curr_tile}.",
+                    ))
+
+        # Blocked movement: directional input held but Link isn't moving
+        if curr_mod in GAMEPLAY_MODULES:
+            joypad = curr.get("joypad_dir", 0) & 0x0F
+            pos_same = (curr.get("link_x") == prev.get("link_x")
+                        and curr.get("link_y") == prev.get("link_y"))
+            if joypad and pos_same:
+                self._blocked_count += 1
+                if self._blocked_count >= 3 and not self._blocked_announced:
+                    tile = curr.facing_tile_name
+                    msg = f"Blocked by {tile}." if tile else "Blocked."
+                    events.append(Event(
+                        "BLOCKED", EventPriority.MEDIUM, msg))
+                    self._blocked_announced = True
+            else:
+                self._blocked_count = 0
+                self._blocked_announced = False
 
         return events
 
@@ -1442,28 +1477,34 @@ def read_memory(ra: RetroArchClient,
     if direction is not None and link_x and link_y and module in (0x07, 0x09):
         off = _FACING_OFFSETS.get(direction)
         if off:
-            tx = link_x + off[0]
-            ty = link_y + off[1]
+            # Pixel coordinates of the tile Link is facing
+            px = link_x + off[0]
+            py = link_y + off[1]
+            # zelda3 convention: x in 8-px tile units, y in pixel units
+            tx = (px >> 3) & 63
+            ty = py & 0x1f8  # align to 8-px boundary, keep 6-bit tile range
             if module == 0x07:
                 # Indoor: read directly from dung_bg2_attr_table ($7F:2000)
                 lower = raw.get("lower_level", 0)
-                dung_off = (ty & ~7) * 8 + (tx & 63) + (0x1000 if lower else 0)
+                dung_off = (ty & ~7) * 8 + tx + (0x1000 if lower else 0)
                 tile_data = ra.read_core_memory(_DUNG_TILEATTR_ADDR + dung_off, 1)
                 if tile_data:
                     facing_tile = tile_data[0]
             elif rom_data and rom_data.map16_to_map8 is not None:
                 # Overworld: read map16 index from WRAM, then look up via ROM tables
+                # base_x/mask_x are in tile units (already >> 3 in WRAM)
                 base_y = raw.get("ow_offset_base_y", 0)
                 mask_y = raw.get("ow_offset_mask_y", 0)
                 base_x = raw.get("ow_offset_base_x", 0)
                 mask_x = raw.get("ow_offset_mask_x", 0)
-                t = ((ty - base_y) & mask_y) * 8
-                t |= ((tx - base_x) & mask_x)
+                ow_tx = (px >> 3)  # tile units for overworld (wider range)
+                t = ((py - base_y) & mask_y) * 8
+                t |= ((ow_tx - base_x) & mask_x)
                 ow_off = t >> 1  # uint16 index
                 tile_data = ra.read_core_memory(_OW_TILEATTR_ADDR + ow_off * 2, 2)
                 if tile_data:
                     map16_idx = int.from_bytes(tile_data, "little")
-                    facing_tile = rom_data.ow_tile_attr(map16_idx, tx, ty)
+                    facing_tile = rom_data.ow_tile_attr(map16_idx, ow_tx, py)
 
     return GameState(raw=raw, sprites=sprites, timestamp=time.time(),
                      rom_data=rom_data, facing_tile=facing_tile)
@@ -1494,12 +1535,30 @@ class ProximityTracker:
     APPROACH_DIST = 64   # ~4 tiles
     NEARBY_DIST = 32     # ~2 tiles
 
-    # Estimated door pixel positions by direction code
-    _DOOR_POSITIONS: dict[int, tuple[int, int]] = {
-        0: (256, 0),     # north
-        1: (256, 480),   # south
-        2: (0, 256),     # west
-        3: (480, 256),   # east
+    # Exact door tile positions from zelda3 kDoorPositionToTilemapOffs tables.
+    # Key: (direction, position), Value: (x_tile, y_tile) in the 64×64 room grid.
+    # Positions 0-5: upper/left half; 6-11: lower/right half of big rooms.
+    _DOOR_TILE_POS: dict[tuple[int, int], tuple[int, int]] = {
+        # North doors
+        (0, 0): (14, 4), (0, 1): (30, 4), (0, 2): (46, 4),
+        (0, 3): (14, 7), (0, 4): (30, 7), (0, 5): (46, 7),
+        (0, 6): (14, 36), (0, 7): (30, 36), (0, 8): (46, 36),
+        (0, 9): (14, 39), (0, 10): (30, 39), (0, 11): (46, 39),
+        # South doors
+        (1, 0): (14, 26), (1, 1): (30, 26), (1, 2): (46, 26),
+        (1, 3): (14, 23), (1, 4): (30, 23), (1, 5): (46, 23),
+        (1, 6): (14, 58), (1, 7): (30, 58), (1, 8): (46, 58),
+        (1, 9): (14, 55), (1, 10): (30, 55), (1, 11): (46, 55),
+        # West doors
+        (2, 0): (2, 15), (2, 1): (2, 31), (2, 2): (2, 47),
+        (2, 3): (5, 15), (2, 4): (5, 31), (2, 5): (5, 47),
+        (2, 6): (34, 15), (2, 7): (34, 31), (2, 8): (34, 47),
+        (2, 9): (37, 15), (2, 10): (37, 31), (2, 11): (37, 47),
+        # East doors
+        (3, 0): (26, 15), (3, 1): (26, 31), (3, 2): (26, 47),
+        (3, 3): (23, 15), (3, 4): (23, 31), (3, 5): (23, 47),
+        (3, 6): (58, 15), (3, 7): (58, 31), (3, 8): (58, 47),
+        (3, 9): (55, 15), (3, 10): (55, 31), (3, 11): (55, 47),
     }
 
     # Object categories worth announcing
@@ -1507,16 +1566,23 @@ class ProximityTracker:
                             "block", "water", "wall", "shrub", "feature",
                             "torch", "interactable"}
 
-    def __init__(self) -> None:
+    # Doorway tile attribute values (from zelda3 tile_detect.c TileHandlerIndoor_22)
+    _DOORWAY_TILES = frozenset(range(0x30, 0x38))
+
+    def __init__(self, ra: Optional['RetroArchClient'] = None) -> None:
+        self._ra = ra
         self._current_room: int = -1
         self._current_ow_screen: int = -1
         self._announced: dict[str, str] = {}  # feature key -> zone
+        self._doorway_features: list[tuple[str, int, int, str]] = []
 
     def check(self, state: GameState) -> list[Event]:
         """Return proximity events for the current poll cycle."""
         if not state.rom_data:
             return []
 
+        link_x = state.get("link_x")
+        link_y = state.get("link_y")
         features: list[tuple[str, int, int, str]] = []
 
         if state.is_in_dungeon:
@@ -1524,9 +1590,14 @@ class ProximityTracker:
             if room_id != self._current_room:
                 self._current_room = room_id
                 self._announced.clear()
+                # Scan WRAM tilemap for implicit doorway tiles
+                if self._ra:
+                    self._doorway_features = self._scan_doorways(
+                        link_x, link_y, state.get("lower_level", 0))
             room = state.rom_data.get_room(room_id)
             if room:
-                features = self._get_features(room)
+                features = self._get_features(room, link_x, link_y)
+                features.extend(self._doorway_features)
         elif state.is_on_overworld:
             ow_screen = state.ow_screen_from_coords
             if ow_screen is not None and ow_screen != self._current_ow_screen:
@@ -1537,10 +1608,9 @@ class ProximityTracker:
 
         if not features:
             return []
-
-        link_x = state.get("link_x")
-        link_y = state.get("link_y")
         events: list[Event] = []
+
+        link_dir_name = DIRECTION_NAMES.get(state.get("direction"))
 
         for key, px, py, desc in features:
             dx = px - link_x
@@ -1550,7 +1620,21 @@ class ProximityTracker:
 
             prev_zone = self._announced.get(key)
             diag = {"key": key, "dist": int(dist), "tile": (px // 16, py // 16)}
-            if dist <= self.NEARBY_DIST and prev_zone != "nearby":
+
+            # Facing: within nearby range and Link faces toward the feature
+            is_facing = (dist <= self.NEARBY_DIST
+                         and link_dir_name
+                         and (direction == link_dir_name
+                              or direction == "here"))
+
+            if is_facing and prev_zone != "facing":
+                events.append(Event(
+                    "FACING", EventPriority.MEDIUM,
+                    f"Facing {desc}.",
+                    diag,
+                ))
+                self._announced[key] = "facing"
+            elif dist <= self.NEARBY_DIST and prev_zone not in ("nearby", "facing"):
                 events.append(Event(
                     "PROXIMITY", EventPriority.MEDIUM,
                     f"{desc} nearby to the {direction}.",
@@ -1565,6 +1649,15 @@ class ProximityTracker:
                 ))
                 self._announced[key] = "approach"
 
+            # Reset facing when Link turns away, allowing re-announcement
+            if prev_zone == "facing" and not is_facing:
+                if dist <= self.NEARBY_DIST:
+                    self._announced[key] = "nearby"
+                elif dist <= self.APPROACH_DIST:
+                    self._announced[key] = "approach"
+                else:
+                    self._announced.pop(key, None)
+
         return events
 
     def scan(self, state: GameState) -> list[str]:
@@ -1572,13 +1665,16 @@ class ProximityTracker:
         if not state.rom_data:
             return []
 
+        link_x = state.get("link_x")
+        link_y = state.get("link_y")
         features: list[tuple[str, int, int, str]] = []
 
         if state.is_in_dungeon:
             room_id = state.get("dungeon_room")
             room = state.rom_data.get_room(room_id)
             if room:
-                features = self._get_features(room)
+                features = self._get_features(room, link_x, link_y)
+                features.extend(self._doorway_features)
         elif state.is_on_overworld:
             ow_screen = state.ow_screen_from_coords
             if ow_screen is not None:
@@ -1586,9 +1682,6 @@ class ProximityTracker:
 
         if not features:
             return []
-
-        link_x = state.get("link_x")
-        link_y = state.get("link_y")
         results: list[tuple[float, str]] = []
 
         for _key, px, py, desc in features:
@@ -1603,22 +1696,36 @@ class ProximityTracker:
         results.sort(key=lambda r: r[0])
         return [r[1] for r in results]
 
-    def _get_features(self, room: 'RoomData') -> list[tuple[str, int, int, str]]:
-        """Extract announceable features as (key, px, py, description)."""
+    def _get_features(self, room: 'RoomData',
+                      link_x: int = 0, link_y: int = 0,
+                      ) -> list[tuple[str, int, int, str]]:
+        """Extract announceable features as (key, px, py, description).
+
+        Dungeon objects/sprites use BG-tilemap-relative coordinates, but
+        Link's position is absolute.  We derive the room's absolute origin
+        from Link's current position (rooms are 512-px aligned).
+        """
         features: list[tuple[str, int, int, str]] = []
 
-        # Doors — estimate position from direction
+        # Room origin in absolute pixel coordinates
+        room_ox = (link_x >> 9) << 9
+        room_oy = (link_y >> 9) << 9
+
+        # Doors — exact tile position from zelda3 tables
         for door in room.doors:
-            pos = self._DOOR_POSITIONS.get(door.direction)
-            if pos:
-                key = f"door:{door.door_type}:{door.direction}"
-                features.append((key, pos[0], pos[1], door.type_name))
+            tile = self._DOOR_TILE_POS.get((door.direction, door.position))
+            if tile:
+                px = room_ox + tile[0] * 8
+                py = room_oy + tile[1] * 8
+                key = f"door:{door.door_type}:{door.direction}:{door.position}"
+                features.append((key, px, py, door.type_name))
 
         # Objects — filtered to interesting categories
+        # Dungeon objects use 8-px tile units (64×64 grid = 512×512 px room)
         for obj in room.objects:
             if obj.category in self._ANNOUNCE_CATEGORIES:
-                px = obj.x_tile * 16
-                py = obj.y_tile * 16
+                px = room_ox + obj.x_tile * 8
+                py = room_oy + obj.y_tile * 8
                 key = f"obj:{obj.object_type}:{obj.x_tile}:{obj.y_tile}"
                 features.append((key, px, py, obj.name))
 
@@ -1626,8 +1733,8 @@ class ProximityTracker:
         # separately via the sprite table with real-time positions).
         for spr in room.sprites:
             if spr.category not in (SpriteCategory.ENEMY, SpriteCategory.UNKNOWN):
-                px = spr.x_tile * 16
-                py = spr.y_tile * 16
+                px = room_ox + spr.x_tile * 16
+                py = room_oy + spr.y_tile * 16
                 key = f"spr:{spr.sprite_type}:{spr.x_tile}:{spr.y_tile}"
                 features.append((key, px, py, spr.name))
 
@@ -1663,13 +1770,70 @@ class ProximityTracker:
             features.append((key, px, py, spr.name))
         return features
 
+    def _scan_doorways(self, link_x: int, link_y: int,
+                       lower_level: int,
+                       ) -> list[tuple[str, int, int, str]]:
+        """Scan WRAM dungeon attribute table for doorway tiles.
+
+        Reads the 64×64 tile attribute table at $7F:2000 and finds tiles
+        with types 0x30-0x37 (doorway/transition tiles from zelda3
+        TileHandlerIndoor_22).  Groups adjacent tiles into clusters and
+        returns each as an "open doorway" feature at the cluster center.
+        """
+        if not self._ra:
+            return []
+        base = _DUNG_TILEATTR_ADDR + (0x1000 if lower_level else 0)
+        data = self._ra.read_core_memory(base, 4096)
+        if not data or len(data) < 4096:
+            return []
+
+        # Find all doorway tiles
+        doorway_set: set[tuple[int, int]] = set()
+        for y in range(64):
+            row_off = y * 64
+            for x in range(64):
+                if data[row_off + x] in self._DOORWAY_TILES:
+                    doorway_set.add((x, y))
+        if not doorway_set:
+            return []
+
+        # Group into connected clusters (flood fill)
+        remaining = set(doorway_set)
+        clusters: list[set[tuple[int, int]]] = []
+        while remaining:
+            seed = remaining.pop()
+            cluster = {seed}
+            queue = [seed]
+            while queue:
+                cx, cy = queue.pop()
+                for nx, ny in ((cx-1, cy), (cx+1, cy),
+                               (cx, cy-1), (cx, cy+1)):
+                    if (nx, ny) in remaining:
+                        remaining.discard((nx, ny))
+                        cluster.add((nx, ny))
+                        queue.append((nx, ny))
+            clusters.append(cluster)
+
+        # Convert to features at cluster center (absolute coordinates)
+        room_ox = (link_x >> 9) << 9
+        room_oy = (link_y >> 9) << 9
+        features: list[tuple[str, int, int, str]] = []
+        for cluster in clusters:
+            cx = sum(t[0] for t in cluster) // len(cluster)
+            cy = sum(t[1] for t in cluster) // len(cluster)
+            px = room_ox + cx * 8
+            py = room_oy + cy * 8
+            key = f"doorway:{cx}:{cy}"
+            features.append((key, px, py, "open doorway"))
+        return features
+
 
 # ─── Memory Poller (Background Thread) ────────────────────────────────────────
 
 class MemoryPoller:
     """Polls emulator memory at ~4 Hz, detects events, prints output."""
 
-    def __init__(self, ra: RetroArchClient, poll_hz: float = 4.0,
+    def __init__(self, ra: RetroArchClient, poll_hz: float = 10.0,
                  dialog_messages: Optional[list[str]] = None,
                  rom_data: Optional[RomData] = None,
                  diag: bool = False):
@@ -1678,7 +1842,7 @@ class MemoryPoller:
         self.rom_data = rom_data
         self.diag = diag
         self.detector = EventDetector(dialog_messages, rom_data)
-        self.proximity = ProximityTracker()
+        self.proximity = ProximityTracker(ra=ra)
         self._state: Optional[GameState] = None
         self._state_lock = threading.Lock()
         self._running = False
@@ -1955,6 +2119,20 @@ def handle_command(cmd: str, poller: MemoryPoller,
                         _say(line.strip())
             else:
                 _say("No description available for this area.")
+            # Append WRAM-detected doorways not covered by ROM doors
+            dw = poller.proximity._doorway_features
+            if dw and state.is_in_dungeon:
+                link_x = state.get("link_x")
+                link_y = state.get("link_y")
+                room_cx = ((link_x >> 9) << 9) + 256
+                room_cy = ((link_y >> 9) << 9) + 256
+                dirs = []
+                for _key, px, py, _desc in dw:
+                    dirs.append(_direction_label(px - room_cx, py - room_cy))
+                seen: set[str] = set()
+                unique = [d for d in dirs if not (d in seen or seen.add(d))]
+                exits = ", ".join(f"open doorway to the {d}" for d in unique)
+                _say(f"Detected exits: {exits}.")
         return True
 
     if cmd == "health":
