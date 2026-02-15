@@ -31,8 +31,9 @@ ROOM_HEADER_BANK_BASE = 0x20000  # bank $04 maps $8000-$FFFF → ROM 0x20000+
 ROOM_SPRITE_PTR_TABLE = 0x4D62E
 ROOM_SPRITE_BANK_BASE = 0x48000  # bank $09 maps $8000-$FFFF → ROM 0x48000+
 
-# Room object pointer table: 320 entries × 3-byte SNES addresses
-ROOM_OBJECT_PTR_TABLE = 0x26F2F
+# Room object pointer table: 320 entries × 3-byte SNES addresses (bank $0B-$0C)
+# SNES $1F:8000 → LoROM offset 0xF8000
+ROOM_OBJECT_PTR_TABLE = 0xF8000
 
 # Overworld sprite pointer tables
 OW_SPRITE_PTR_TABLE_LW = 0x4C881   # Light World screens 0x00-0x3F
@@ -259,78 +260,148 @@ SPRITE_TYPE_NAMES: dict[int, tuple[str, str]] = {
 
 # ─── Door Type Names ─────────────────────────────────────────────────────────
 
-# Door types from the 2-byte door entries in room object data.
-# Format: direction nibble | type nibble
+# Door encoding (from zelda3 reimplementation):
+#   Low byte:  PPPP DD00  (P = position 0-11, D = direction 0-3)
+#   High byte: TTTTTTTT   (door type)
 DOOR_DIRECTION_NAMES = {
-    0x00: "north",
-    0x02: "south",
-    0x04: "west",
-    0x06: "east",
+    0: "north",
+    1: "south",
+    2: "west",
+    3: "east",
 }
 
 DOOR_TYPE_NAMES: dict[int, str] = {
-    0x00: "open doorway",
-    0x02: "normal doorway",
-    0x04: "bombable wall",
-    0x06: "dungeon swap",
-    0x08: "layer swap",
-    0x0A: "dungeon toggle",
-    0x0E: "locked door",
-    0x10: "shutter door",
-    0x12: "big key door",
-    0x14: "key door",
-    0x16: "shutter door (one-way)",
-    0x18: "dungeon entrance",
-    0x1A: "dungeon exit",
-    0x20: "cave entrance",
-    0x22: "cave exit",
-    0x24: "passageway entrance",
-    0x26: "passageway exit",
-    0x28: "dungeon lobby entrance",
-    0x2A: "dungeon lobby exit",
-    0x30: "staircase",
-    0x32: "spiral staircase up",
-    0x34: "spiral staircase down",
-    0x36: "straight staircase up",
-    0x38: "straight staircase down",
+    0:  "open doorway",
+    2:  "normal doorway",
+    4:  "passage",
+    6:  "entrance door",
+    8:  "waterfall tunnel",
+    10: "entrance (large)",
+    12: "entrance (large, alt)",
+    14: "cave entrance",
+    16: "cave entrance (alt)",
+    18: "exit to overworld",
+    20: "throne room",
+    22: "player layer change",
+    24: "shutter (two-way)",
+    26: "invisible door",
+    28: "small key door",
+    30: "small key door (alt)",
+    32: "staircase (locked 0)",
+    34: "staircase (locked 1)",
+    36: "staircase (locked 2)",
+    38: "staircase (locked 3)",
+    40: "breakable wall",
+    42: "breakable wall (alt)",
+    44: "breakable wall (alt 2)",
+    46: "breakable wall (alt 3)",
+    48: "large explosion wall",
+    50: "slashable curtain",
+    64: "regular door",
+    68: "shutter",
+    70: "warp room door",
+    72: "shutter trap (upper-right)",
+    74: "shutter trap (down-left)",
 }
 
 
 # ─── Object Type Names ───────────────────────────────────────────────────────
 
-# Selected object type IDs from the 3-byte room object entries.
-# Only objects relevant for accessibility descriptions are included.
+# Room object type IDs from the 3-byte room object entries.
+# Derived from the zelda3 reimplementation (snesrev/zelda3).
+# Only objects relevant for accessibility descriptions are included;
+# structural elements (walls, ceilings, floor tiles) are omitted.
+#
+# Subtype 0: obj_type = p2                        (range 0x00-0xF7)
+# Subtype 1: obj_type = 0x100 + computed_index    (range 0x100-0x17F)
+# Subtype 2: obj_type = 0x200 + (p2 & 0x3F)      (range 0x200-0x23F)
+
 OBJECT_TYPE_NAMES: dict[int, tuple[str, str]] = {
     # type_id -> (name, category)
-    # category: stairs, chest, pit, water, block, switch, torch, hazard, feature
-    0x00: ("floor", "feature"),
-    0x01: ("wall", "feature"),
-    0x0C: ("large chest", "chest"),
-    0x0E: ("small chest", "chest"),
-    0x23: ("stairs going up", "stairs"),
-    0x24: ("stairs going down", "stairs"),
-    0x27: ("pit", "pit"),
-    0x28: ("deep water", "water"),
-    0x2B: ("push block", "block"),
-    0x2C: ("torch (lit)", "torch"),
-    0x2D: ("torch (unlit)", "torch"),
-    0x30: ("rupee floor", "feature"),
-    0x34: ("conveyor belt north", "hazard"),
-    0x35: ("conveyor belt south", "hazard"),
-    0x36: ("conveyor belt west", "hazard"),
-    0x37: ("conveyor belt east", "hazard"),
-    0x38: ("spikes", "hazard"),
-    0x3D: ("switch", "switch"),
-    0x44: ("thick grass", "feature"),
-    0x46: ("warp tile", "feature"),
-    0x48: ("bombable floor", "feature"),
-    0x50: ("shallow water", "water"),
-    0x56: ("ledge", "feature"),
-    0x58: ("liftable rock", "interactable"),
-    0x5A: ("liftable pot", "interactable"),
-    0x5B: ("push block", "block"),
-    0x62: ("crystal switch", "switch"),
-    0x66: ("big key lock", "feature"),
+    # Categories: stairs, chest, pit, water, block, switch, torch,
+    #             hazard, interactable, feature
+
+    # ── Subtype 0 (structural with gameplay relevance) ──
+    0x21: ("mini stairs", "stairs"),
+    0x38: ("statue", "feature"),
+    0x3D: ("standing torch", "torch"),
+    0x5E: ("block", "block"),
+    0x87: ("floor torch", "torch"),
+    0x89: ("block", "block"),
+    0x92: ("blue peg block", "block"),
+    0x93: ("orange peg block", "block"),
+    0x96: ("hammer peg block", "block"),
+    0xA4: ("hole", "pit"),
+    0xB8: ("blue switch block", "switch"),
+    0xB9: ("red switch block", "switch"),
+    0xBD: ("hammer peg", "block"),
+    0xC8: ("water floor", "water"),
+    0xC9: ("water floor", "water"),
+    0xD1: ("water floor", "water"),
+    0xDE: ("spike block", "hazard"),
+    0xDF: ("spike floor", "hazard"),
+    0xE3: ("conveyor belt (north)", "hazard"),
+    0xE4: ("conveyor belt (south)", "hazard"),
+    0xE5: ("conveyor belt (west)", "hazard"),
+    0xE6: ("conveyor belt (east)", "hazard"),
+
+    # ── Subtype 1 (discrete gameplay objects) ──
+    0x10D: ("prison cell", "feature"),
+    0x113: ("telepathic tile", "interactable"),
+    0x116: ("hammer peg", "block"),
+    0x118: ("cell lock", "interactable"),
+    0x119: ("chest", "chest"),
+    0x11A: ("open chest", "chest"),
+    0x11B: ("staircase", "stairs"),
+    0x11C: ("staircase", "stairs"),
+    0x11D: ("staircase", "stairs"),
+    0x11E: ("staircase going up", "stairs"),
+    0x11F: ("staircase going down", "stairs"),
+    0x120: ("staircase going up", "stairs"),
+    0x121: ("staircase going down", "stairs"),
+    0x126: ("staircase going up", "stairs"),
+    0x127: ("staircase going up", "stairs"),
+    0x128: ("staircase going down", "stairs"),
+    0x129: ("staircase going down", "stairs"),
+    0x12B: ("staircase going down", "stairs"),
+    0x12C: ("large block", "block"),
+    0x12F: ("pot", "interactable"),
+    0x131: ("big chest", "chest"),
+    0x132: ("big chest (open)", "chest"),
+    0x133: ("staircase", "stairs"),
+    0x147: ("bomb floor", "interactable"),
+    0x14A: ("warp tile", "interactable"),
+    0x150: ("floor switch", "switch"),
+    0x151: ("skull pot", "interactable"),
+    0x152: ("blue peg", "block"),
+    0x153: ("red peg", "block"),
+    0x163: ("fake floor switch", "hazard"),
+    0x164: ("fireball shooter", "hazard"),
+    0x165: ("medusa head", "hazard"),
+    0x166: ("hole", "pit"),
+    0x167: ("bombable wall (north)", "interactable"),
+    0x168: ("bombable wall (south)", "interactable"),
+    0x169: ("bombable wall (west)", "interactable"),
+    0x16A: ("bombable wall (east)", "interactable"),
+    0x174: ("boss entrance", "interactable"),
+    0x175: ("minigame chest", "chest"),
+
+    # ── Subtype 2 (single-tile objects) ──
+    0x21C: ("fairy pot", "interactable"),
+    0x21D: ("statue", "feature"),
+    0x21E: ("star tile", "switch"),
+    0x21F: ("star tile", "switch"),
+    0x220: ("torch (lit)", "torch"),
+    0x221: ("barrel", "interactable"),
+    0x22D: ("floor stairs up", "stairs"),
+    0x22E: ("floor stairs down", "stairs"),
+    0x22F: ("floor stairs down", "stairs"),
+    0x231: ("staircase", "stairs"),
+    0x232: ("staircase", "stairs"),
+    0x234: ("block", "block"),
+    0x235: ("water ladder", "interactable"),
+    0x236: ("water ladder", "interactable"),
+    0x237: ("water gate", "interactable"),
 }
 
 
@@ -423,6 +494,35 @@ class RoomObject:
         return entry[1] if entry else "unknown"
 
 
+def _pluralize(name: str) -> str:
+    """Pluralize a name, handling parenthetical suffixes.
+
+    Examples:
+        "chest"                 → "chests"
+        "crystal switch"        → "crystal switches"
+        "stairs going up"       → "stairs going up"  (already plural)
+        "bombable wall (north)" → "bombable walls (north)"
+        "Spark (clockwise)"     → "Sparks (clockwise)"
+        "Armos"                 → "Armos"  (already ends in s)
+    """
+    # Split off parenthetical suffix if present
+    paren_idx = name.find("(")
+    if paren_idx > 0:
+        base = name[:paren_idx].rstrip()
+        suffix = " " + name[paren_idx:]
+    else:
+        base = name
+        suffix = ""
+
+    # Skip if any word already looks plural
+    if any(w.endswith("s") for w in base.split()):
+        return name
+    # Add -es for sibilant endings
+    if base.endswith(("ch", "sh", "x", "z")):
+        return base + "es" + suffix
+    return base + "s" + suffix
+
+
 @dataclass
 class RoomData:
     room_id: int
@@ -446,9 +546,7 @@ class RoomData:
         parts = []
         for name, count in counts.items():
             if count > 1:
-                # Simple pluralization: don't double up trailing 's'
-                plural = name if name.endswith("s") else f"{name}s"
-                parts.append(f"{count} {plural}")
+                parts.append(f"{count} {_pluralize(name)}")
             else:
                 parts.append(name)
         return ", ".join(parts)
@@ -611,8 +709,7 @@ class RomData:
                 counts = Counter(groups[cat])
                 for name, count in counts.items():
                     if count > 1:
-                        plural = name if name.endswith("s") else f"{name}s"
-                        parts.append(f"{count} {plural}")
+                        parts.append(f"{count} {_pluralize(name)}")
                     else:
                         parts.append(name)
         if parts:
@@ -823,17 +920,115 @@ def _parse_room_sprites(rom: bytes, offset: int) -> dict[int, list[RoomSprite]]:
     return sprites
 
 
+def _parse_object_layer(rom: bytes, pos: int, max_objects: int = 200,
+                        ) -> tuple[list[RoomObject], list[DoorObject], int]:
+    """Parse one layer of room data: 3-byte objects, optional doors.
+
+    Data format (from zelda3 reimplementation):
+      3-byte object entries until 0xFFF0 or 0xFFFF.
+      0xFFF0 → door entries (2-byte each) follow, terminated by 0xFFFF.
+      0xFFFF → layer ends with no doors.
+
+    Object encoding (3 bytes: p0, p1, p2):
+      Subtype 0 (p2 < 0xF8, low 6 bits of p0 != 0xFC):
+        X = (p0 >> 2) & 0x3F, Y = (p1 >> 2) & 0x3F, type = p2
+      Subtype 1 (p2 >= 0xF8, low 6 bits of p0 != 0xFC):
+        X = (p0 >> 2) & 0x3F, Y = (p1 >> 2) & 0x3F
+        type = (p2 & 7) << 4 | (p1 & 3) << 2 | (p0 & 3)  [0x100+ range]
+      Subtype 2 (low 6 bits of p0 == 0xFC):
+        X = ((p0 & 3) << 4 | (p1 >> 4)) & 0x3F
+        Y = ((p1 & 0x0F) << 2 | (p2 >> 6)) & 0x3F
+        type = (p2 & 0x3F)  [0x200+ range]
+
+    Door encoding (2 bytes):
+      Low byte:  PPPPDD00  (P=position, D=direction 0=N 1=S 2=W 3=E)
+      High byte: door type
+
+    Returns (objects, doors, next_pos).
+    """
+    objects: list[RoomObject] = []
+    doors: list[DoorObject] = []
+    obj_count = 0
+
+    while pos + 2 <= len(rom) and obj_count < max_objects:
+        w = struct.unpack_from("<H", rom, pos)[0]
+
+        if w == 0xFFFF:
+            # Layer ends, no doors
+            pos += 2
+            return objects, doors, pos
+
+        if w == 0xFFF0:
+            # Objects end, doors follow
+            pos += 2
+            door_count = 0
+            while pos + 2 <= len(rom) and door_count < 16:
+                dw = struct.unpack_from("<H", rom, pos)[0]
+                if dw == 0xFFFF:
+                    pos += 2
+                    return objects, doors, pos
+
+                door_dir = dw & 3
+                door_pos = (dw >> 4) & 0xF
+                door_type = (dw >> 8) & 0xFF
+
+                if door_dir in DOOR_DIRECTION_NAMES:
+                    doors.append(DoorObject(
+                        direction=door_dir,
+                        door_type=door_type,
+                        position=door_pos,
+                    ))
+
+                pos += 2
+                door_count += 1
+            return objects, doors, pos
+
+        if pos + 3 > len(rom):
+            break
+
+        p0 = rom[pos]
+        p1 = rom[pos + 1]
+        p2 = rom[pos + 2]
+
+        if (p0 & 0xFC) == 0xFC:
+            # Subtype 2
+            x_tile = ((p0 & 3) << 4 | (p1 >> 4)) & 0x3F
+            y_tile = ((p1 & 0x0F) << 2 | (p2 >> 6)) & 0x3F
+            obj_type = 0x200 + (p2 & 0x3F)
+        elif p2 >= 0xF8:
+            # Subtype 1
+            x_tile = (p0 >> 2) & 0x3F
+            y_tile = (p1 >> 2) & 0x3F
+            obj_type = 0x100 + ((p2 & 7) << 4 | (p1 & 3) << 2 | (p0 & 3))
+        else:
+            # Subtype 0
+            x_tile = (p0 >> 2) & 0x3F
+            y_tile = (p1 >> 2) & 0x3F
+            obj_type = p2
+
+        if obj_type in OBJECT_TYPE_NAMES:
+            objects.append(RoomObject(
+                x_tile=x_tile,
+                y_tile=y_tile,
+                object_type=obj_type,
+            ))
+
+        pos += 3
+        obj_count += 1
+
+    return objects, doors, pos
+
+
 def _parse_room_objects(rom: bytes, offset: int) -> dict[int, tuple[list[RoomObject], list[DoorObject]]]:
     """Parse room object/door data for all 320 rooms.
 
-    Room object data starts with 3-byte SNES pointers in the pointer table.
-    The layout data contains:
-    - 2-byte header (floor1/floor2)
-    - 3-byte object entries until marker (0xFFFF in first 2 bytes)
-    - 2-byte door entries until 0xFFFF
+    Room data format (from zelda3 reimplementation):
+    - 2-byte header: floor byte + layout/quadrant byte
+    - Layer 1 objects + optional doors (terminated by 0xFFFF)
+    - Layer 2 objects + optional doors (terminated by 0xFFFF)
+    - Layer 3 objects + optional doors (terminated by 0xFFFF)
 
     Returns dict mapping room_id -> (objects, doors).
-    Falls back gracefully if format doesn't verify.
     """
     result: dict[int, tuple[list[RoomObject], list[DoorObject]]] = {}
     ptr_base = offset + ROOM_OBJECT_PTR_TABLE
@@ -860,70 +1055,19 @@ def _parse_room_objects(rom: bytes, offset: int) -> dict[int, tuple[list[RoomObj
         if rom_off < 0 or rom_off >= len(rom):
             continue
 
-        objects: list[RoomObject] = []
-        doors: list[DoorObject] = []
-
-        # Skip 2-byte floor header
+        # Skip 2-byte header (floor + layout/quadrant)
         pos = rom_off + 2
-        max_objects = 200  # Safety limit
 
-        # Parse 3-byte object entries
-        obj_count = 0
-        while pos + 3 <= len(rom) and obj_count < max_objects:
-            w = struct.unpack_from("<H", rom, pos)[0]
-            if w == 0xFFFF:
-                pos += 2
-                break
-            # Check for subtype 3 (0xFFF0 mask)
-            if (w & 0xFC00) == 0xFC00:
-                # Extended object - skip 3 bytes
-                pos += 3
-                obj_count += 1
-                continue
+        all_objects: list[RoomObject] = []
+        all_doors: list[DoorObject] = []
 
-            b2_val = rom[pos + 2]
+        # Parse 3 layers
+        for _ in range(3):
+            layer_objs, layer_doors, pos = _parse_object_layer(rom, pos)
+            all_objects.extend(layer_objs)
+            all_doors.extend(layer_doors)
 
-            # Decode 3-byte object: position + type
-            # Bits: DDDD DDYY YYYX XXXX TTTT TTTT
-            #   but actual encoding varies. Simplified extraction:
-            x_tile = w & 0x3F
-            y_tile = (w >> 6) & 0x3F
-            obj_type = b2_val
-
-            if obj_type in OBJECT_TYPE_NAMES:
-                objects.append(RoomObject(
-                    x_tile=x_tile,
-                    y_tile=y_tile,
-                    object_type=obj_type,
-                ))
-
-            pos += 3
-            obj_count += 1
-
-        # Parse 2-byte door entries
-        door_count = 0
-        while pos + 2 <= len(rom) and door_count < 16:
-            dw = struct.unpack_from("<H", rom, pos)[0]
-            if dw == 0xFFFF:
-                break
-
-            # Door format: position | direction | type
-            door_dir = (dw >> 8) & 0xFE
-            door_type = dw & 0xFE
-            door_pos = (dw >> 8) & 0x01
-
-            # Only record doors with known types
-            if door_type in DOOR_TYPE_NAMES and door_dir in DOOR_DIRECTION_NAMES:
-                doors.append(DoorObject(
-                    direction=door_dir,
-                    door_type=door_type,
-                    position=door_pos,
-                ))
-
-            pos += 2
-            door_count += 1
-
-        result[room_id] = (objects, doors)
+        result[room_id] = (all_objects, all_doors)
 
     return result
 

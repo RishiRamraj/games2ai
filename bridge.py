@@ -15,6 +15,7 @@ Setup:
 """
 
 import argparse
+import json
 import os
 import re
 import socket
@@ -25,7 +26,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional
 
-from rom_reader import RomData, load_rom
+from rom_reader import RomData, SpriteCategory, load_rom
 
 
 # ─── Memory Address Table ────────────────────────────────────────────────────
@@ -1314,6 +1315,134 @@ def _say(text: str) -> None:
     print(text, flush=True)
 
 
+# ─── Proximity Tracker ───────────────────────────────────────────────────────
+
+class ProximityTracker:
+    """Announces nearby room features as Link approaches them.
+
+    Tracks two distance zones per feature (approach / nearby) and only
+    announces when Link crosses a threshold boundary inward.  Resets
+    tracking on room change.
+    """
+
+    APPROACH_DIST = 64   # ~4 tiles
+    NEARBY_DIST = 32     # ~2 tiles
+
+    # Estimated door pixel positions by direction code
+    _DOOR_POSITIONS: dict[int, tuple[int, int]] = {
+        0: (256, 0),     # north
+        1: (256, 480),   # south
+        2: (0, 256),     # west
+        3: (480, 256),   # east
+    }
+
+    # Object categories worth announcing
+    _ANNOUNCE_CATEGORIES = {"chest", "stairs", "pit", "hazard", "switch",
+                            "block", "water", "wall", "shrub"}
+
+    def __init__(self) -> None:
+        self._current_room: int = -1
+        self._announced: dict[str, str] = {}  # feature key -> zone
+
+    def check(self, state: GameState) -> list[Event]:
+        """Return proximity events for the current poll cycle."""
+        if not state.rom_data or not state.is_in_dungeon:
+            return []
+
+        room_id = state.get("dungeon_room")
+        if room_id != self._current_room:
+            self._current_room = room_id
+            self._announced.clear()
+
+        room = state.rom_data.get_room(room_id)
+        if not room:
+            return []
+
+        link_x = state.get("link_x")
+        link_y = state.get("link_y")
+        events: list[Event] = []
+
+        for key, px, py, desc in self._get_features(room):
+            dx = px - link_x
+            dy = py - link_y
+            dist = (dx * dx + dy * dy) ** 0.5
+            direction = _direction_label(dx, dy)
+
+            prev_zone = self._announced.get(key)
+            diag = {"key": key, "dist": int(dist), "tile": (px // 16, py // 16)}
+            if dist <= self.NEARBY_DIST and prev_zone != "nearby":
+                events.append(Event(
+                    "PROXIMITY", EventPriority.MEDIUM,
+                    f"{desc} nearby to the {direction}.",
+                    diag,
+                ))
+                self._announced[key] = "nearby"
+            elif dist <= self.APPROACH_DIST and prev_zone is None:
+                events.append(Event(
+                    "PROXIMITY", EventPriority.LOW,
+                    f"Approaching {desc} to the {direction}.",
+                    diag,
+                ))
+                self._announced[key] = "approach"
+
+        return events
+
+    def scan(self, state: GameState) -> list[str]:
+        """List all features within approach range, sorted by distance."""
+        if not state.rom_data or not state.is_in_dungeon:
+            return []
+
+        room_id = state.get("dungeon_room")
+        room = state.rom_data.get_room(room_id)
+        if not room:
+            return []
+
+        link_x = state.get("link_x")
+        link_y = state.get("link_y")
+        results: list[tuple[float, str]] = []
+
+        for _key, px, py, desc in self._get_features(room):
+            dx = px - link_x
+            dy = py - link_y
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist <= self.APPROACH_DIST:
+                direction = _direction_label(dx, dy)
+                results.append((dist, f"{desc} to the {direction}, "
+                                      f"{int(dist)} pixels away."))
+
+        results.sort(key=lambda r: r[0])
+        return [r[1] for r in results]
+
+    def _get_features(self, room: 'RoomData') -> list[tuple[str, int, int, str]]:
+        """Extract announceable features as (key, px, py, description)."""
+        features: list[tuple[str, int, int, str]] = []
+
+        # Doors — estimate position from direction
+        for door in room.doors:
+            pos = self._DOOR_POSITIONS.get(door.direction)
+            if pos:
+                key = f"door:{door.door_type}:{door.direction}"
+                features.append((key, pos[0], pos[1], door.type_name))
+
+        # Objects — filtered to interesting categories
+        for obj in room.objects:
+            if obj.category in self._ANNOUNCE_CATEGORIES:
+                px = obj.x_tile * 16
+                py = obj.y_tile * 16
+                key = f"obj:{obj.object_type}:{obj.x_tile}:{obj.y_tile}"
+                features.append((key, px, py, obj.name))
+
+        # Sprites — hazard category only (enemies handled separately)
+        for spr in room.sprites:
+            if spr.category == SpriteCategory.HAZARD:
+                px = spr.x_tile * 16
+                py = spr.y_tile * 16
+                key = f"spr:{spr.sprite_type}:{spr.x_tile}:{spr.y_tile}"
+                features.append((key, px, py, spr.name))
+
+        return features
+
+
 # ─── Memory Poller (Background Thread) ────────────────────────────────────────
 
 class MemoryPoller:
@@ -1321,11 +1450,14 @@ class MemoryPoller:
 
     def __init__(self, ra: RetroArchClient, poll_hz: float = 4.0,
                  dialog_messages: Optional[list[str]] = None,
-                 rom_data: Optional[RomData] = None):
+                 rom_data: Optional[RomData] = None,
+                 diag: bool = False):
         self.ra = ra
         self.poll_interval = 1.0 / poll_hz
         self.rom_data = rom_data
+        self.diag = diag
         self.detector = EventDetector(dialog_messages, rom_data)
+        self.proximity = ProximityTracker()
         self._state: Optional[GameState] = None
         self._state_lock = threading.Lock()
         self._running = False
@@ -1345,6 +1477,35 @@ class MemoryPoller:
         self._running = False
         if self._thread:
             self._thread.join(timeout=2.0)
+
+    def _diag_dump_room(self, state: GameState) -> None:
+        """Print raw feature data for the current room (diagnostic mode)."""
+        if not state.rom_data or not state.is_in_dungeon:
+            return
+        room_id = state.get("dungeon_room")
+        room = state.rom_data.get_room(room_id)
+        if not room:
+            return
+        _say(f"[DIAG] Room {room_id:#06x} feature dump:")
+        _say(f"[DIAG] Link at pixel ({state.get('link_x')}, {state.get('link_y')})")
+        if room.header:
+            _say(f"[DIAG] Header: tag1={room.header.tag1:#04x} "
+                 f"tag2={room.header.tag2:#04x}")
+        for door in room.doors:
+            _say(f"[DIAG]   DOOR  dir={door.direction:#04x}({door.direction_name})  "
+                 f"type={door.door_type:#04x}({door.type_name})  "
+                 f"pos={door.position}")
+        for obj in room.objects:
+            _say(f"[DIAG]   OBJ   type={obj.object_type:#04x}  "
+                 f"cat={obj.category:<12s}  name={obj.name:<24s}  "
+                 f"tile=({obj.x_tile}, {obj.y_tile})")
+        for spr in room.sprites:
+            _say(f"[DIAG]   SPR   type={spr.sprite_type:#04x}  "
+                 f"cat={spr.category:<12s}  name={spr.name:<24s}  "
+                 f"tile=({spr.x_tile}, {spr.y_tile})  "
+                 f"layer={'lower' if spr.is_lower_layer else 'upper'}")
+        if not room.doors and not room.objects and not room.sprites:
+            _say("[DIAG]   (no features)")
 
     def _poll_loop(self):
         prev_state: Optional[GameState] = None
@@ -1375,6 +1536,17 @@ class MemoryPoller:
                     events = self.detector.detect(prev_state, new_state)
                     for event in events:
                         _say(event.message)
+                        # Diag: dump room features on room change
+                        if self.diag and event.kind == "ROOM_CHANGE":
+                            self._diag_dump_room(new_state)
+
+                # Proximity announcements
+                prox_events = self.proximity.check(new_state)
+                for event in prox_events:
+                    if self.diag:
+                        _say(f"  [DIAG] {event.message} | {event.data}")
+                    else:
+                        _say(event.message)
 
                 prev_state = new_state
 
@@ -1382,6 +1554,137 @@ class MemoryPoller:
                 pass  # Don't crash the polling thread
 
             time.sleep(self.poll_interval)
+
+
+# ─── State Dump ──────────────────────────────────────────────────────────────
+
+def dump_state(state: GameState, path: str = "dump.json") -> str:
+    """Write a comprehensive state snapshot to a JSON file for debugging.
+
+    Includes raw memory, bridge interpretations, ROM room data, and live
+    sprites so classification errors can be compared against what is
+    actually on screen.
+    """
+    data: dict = {}
+
+    # Raw memory values
+    data["raw_memory"] = {k: (f"0x{v:X}" if v is not None else None)
+                          for k, v in state.raw.items()}
+
+    # Bridge interpretations
+    data["interpreted"] = {
+        "location": state.location_name,
+        "world": state.world_name,
+        "indoors": state.is_indoors,
+        "in_dungeon": state.is_in_dungeon,
+        "on_overworld": state.is_on_overworld,
+        "direction": state.direction_name,
+        "main_module": MODULE_NAMES.get(state.get("main_module"),
+                                         f"unknown ({state.get('main_module'):#04x})"),
+        "link_state": LINK_STATE_NAMES.get(state.get("link_state"),
+                                            f"unknown ({state.get('link_state'):#04x})"),
+        "health": state.format_health(),
+        "position": {"x": state.get("link_x"), "y": state.get("link_y")},
+        "dungeon_room": f"0x{state.get('dungeon_room'):04X}",
+        "ow_screen": f"0x{state.get('ow_screen'):04X}",
+    }
+
+    # Live sprite table (from emulator memory)
+    live_sprites = []
+    for s in state.sprites:
+        if s.is_active:
+            live_sprites.append({
+                "slot": s.index,
+                "type_id": f"0x{s.type_id:02X}",
+                "name": s.name,
+                "is_enemy": s.is_enemy,
+                "state": s.state,
+                "x": s.x,
+                "y": s.y,
+            })
+    data["live_sprites"] = live_sprites
+
+    # Nearby enemies (bridge's proximity calculation)
+    data["nearby_enemies"] = state.nearby_enemies()
+
+    # ROM room data (static placement from cartridge)
+    rom_section: dict = {"available": False}
+    if state.rom_data:
+        rom_section["available"] = True
+        if state.is_in_dungeon:
+            room_id = state.get("dungeon_room")
+            room = state.rom_data.get_room(room_id)
+            if room:
+                rom_section["room_id"] = f"0x{room.room_id:04X}"
+                rom_section["dungeon"] = room.dungeon_name
+
+                if room.header:
+                    rom_section["header"] = {
+                        "tag1": f"0x{room.header.tag1:02X}",
+                        "tag2": f"0x{room.header.tag2:02X}",
+                        "is_dark": room.header.is_dark,
+                        "kill_to_open": room.header.has_kill_to_open,
+                        "moving_floor": room.header.has_moving_floor,
+                        "spriteset": room.header.spriteset,
+                    }
+
+                rom_section["sprites"] = [
+                    {
+                        "type_id": f"0x{s.sprite_type:02X}",
+                        "name": s.name,
+                        "category": s.category,
+                        "tile": [s.x_tile, s.y_tile],
+                        "layer": "lower" if s.is_lower_layer else "upper",
+                    }
+                    for s in room.sprites
+                ]
+
+                rom_section["doors"] = [
+                    {
+                        "direction": d.direction_name,
+                        "type": d.type_name,
+                        "type_id": f"0x{d.door_type:02X}",
+                        "position": d.position,
+                    }
+                    for d in room.doors
+                ]
+
+                rom_section["objects"] = [
+                    {
+                        "type_id": f"0x{o.object_type:02X}",
+                        "name": o.name,
+                        "category": o.category,
+                        "tile": [o.x_tile, o.y_tile],
+                    }
+                    for o in room.objects
+                ]
+
+                rom_section["brief"] = room.to_brief()
+                rom_section["full"] = room.to_full()
+
+        elif state.is_on_overworld:
+            screen = state.get("ow_screen")
+            rom_section["ow_screen"] = f"0x{screen:04X}"
+            rom_section["ow_sprites"] = [
+                {
+                    "type_id": f"0x{s.sprite_type:02X}",
+                    "name": s.name,
+                    "category": s.category,
+                    "tile": [s.x_tile, s.y_tile],
+                }
+                for s in state.rom_data.get_ow_sprites(screen)
+            ]
+
+    data["rom_data"] = rom_section
+
+    # Area description (what the bridge would announce)
+    data["area_description"] = state.area_description
+    data["area_brief"] = state.area_brief
+
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+    return path
 
 
 # ─── Commands ─────────────────────────────────────────────────────────────────
@@ -1394,6 +1697,9 @@ COMMANDS: dict[str, str] = {
     "health":   "Health, magic, and resources",
     "items":    "Equipment and inventory",
     "enemies":  "Nearby enemies and directions",
+    "scan":     "Nearby room features (doors, chests, hazards)",
+    "dump":     "Write full state snapshot to dump.json",
+    "diag":     "Dump raw room features (diagnostic)",
     "progress": "Pendants, crystals, and progress",
     "status":   "RetroArch connection status",
     "help":     "List available commands",
@@ -1446,6 +1752,39 @@ def handle_command(cmd: str, poller: MemoryPoller,
         _say(state.format_enemies() if state else _NO_STATE)
         return True
 
+    if cmd == "scan":
+        state = poller.get_state()
+        if not state:
+            _say(_NO_STATE)
+        else:
+            features = poller.proximity.scan(state)
+            if features:
+                _say("Nearby features:")
+                for f in features:
+                    _say(f"  {f}")
+            else:
+                _say("No features nearby.")
+        return True
+
+    if cmd == "dump" or cmd.startswith("dump "):
+        state = poller.get_state()
+        if not state:
+            _say(_NO_STATE)
+        else:
+            parts = cmd.split(maxsplit=1)
+            path = parts[1] if len(parts) > 1 else "dump.json"
+            out = dump_state(state, path)
+            _say(f"State dumped to {out}.")
+        return True
+
+    if cmd == "diag":
+        state = poller.get_state()
+        if not state:
+            _say(_NO_STATE)
+        else:
+            poller._diag_dump_room(state)
+        return True
+
     if cmd == "progress":
         state = poller.get_state()
         _say(state.format_progress() if state else _NO_STATE)
@@ -1494,6 +1833,11 @@ Examples:
                         help="Path to ALttP ROM file (.sfc) for geometric room descriptions")
     parser.add_argument("--text", default=None,
                         help="Path to ALttP text dump file (default: text.txt next to bridge.py)")
+    parser.add_argument("--diag", action="store_true",
+                        help="Diagnostic mode: show raw IDs and categories for all detected features")
+    parser.add_argument("--dump", nargs="?", const="dump.json", default=None,
+                        metavar="FILE",
+                        help="Single-shot: read memory once, write state to FILE (default: dump.json), and exit")
     args = parser.parse_args()
 
     # Load ROM data if provided
@@ -1540,10 +1884,24 @@ Examples:
     if status:
         _say(f"Status: {status}")
 
+    # Single-shot dump mode: read once, write file, exit
+    if args.dump:
+        _say("Reading memory for state dump...")
+        state = read_memory(ra, rom_data)
+        if state.raw.get("main_module") is None:
+            _say("Could not read game state. Is a game loaded?")
+            ra.close()
+            sys.exit(1)
+        out = dump_state(state, args.dump)
+        _say(f"State dumped to {out}.")
+        ra.close()
+        sys.exit(0)
+
     # Start poller
     poller = MemoryPoller(ra, poll_hz=args.poll_hz,
                           dialog_messages=dialog_messages,
-                          rom_data=rom_data)
+                          rom_data=rom_data,
+                          diag=args.diag)
     poller.start()
 
     _say("ALttP Accessibility Bridge started. Type help for commands.")
