@@ -12,6 +12,8 @@ No external dependencies -- uses only the Python standard library.
 sudo apt install retroarch libretro-bsnes-mercury-accuracy
 ```
 
+**ALttP ROM** — a US version `.sfc` file (1 MB, headerless or with 512-byte SMC header).
+
 ## RetroArch Configuration
 
 Edit `~/.config/retroarch/retroarch.cfg` and ensure:
@@ -27,45 +29,85 @@ Or toggle it in the RetroArch UI: **Settings > Network > Network Commands > ON**
 
 ```bash
 # Start the bridge (RetroArch must be running with ALttP loaded)
-python bridge.py
+python bridge.py --rom /path/to/rom.sfc
 
-# Custom RetroArch port
-python bridge.py --port 55356
+# With live ASCII map overlay
+python bridge.py --rom /path/to/rom.sfc --map
 
-# Custom text dump path
-python bridge.py --text /path/to/text.txt
+# Map with proximity ring/cone overlays
+python bridge.py --rom /path/to/rom.sfc --map --map-overlay
 
-# Adjust poll rate
-python bridge.py --poll-hz 8
+# Single-shot map snapshot (renders once and exits)
+python bridge.py --rom /path/to/rom.sfc --map-snap
+
+# Debug state dump (writes dump.json and exits)
+python bridge.py --rom /path/to/rom.sfc --dump
+
+# Diagnostic mode (shows distance/tile data with proximity events)
+python bridge.py --rom /path/to/rom.sfc --diag
+
+# Custom RetroArch port or poll rate
+python bridge.py --rom /path/to/rom.sfc --port 55356 --poll-hz 15
 ```
 
 ## Commands
+
+Type these while the bridge is running:
 
 | Command    | Description                            |
 |------------|----------------------------------------|
 | `pos`      | Current position, room, direction      |
 | `look`     | Description of the current area        |
+| `scan`     | List all nearby objects with distances  |
 | `health`   | Health, magic, resources               |
 | `items`    | Equipment and inventory                |
 | `enemies`  | Nearby enemies and directions          |
 | `progress` | Pendants, crystals, progress           |
+| `dump`     | Write full state snapshot to dump.json |
 | `status`   | RetroArch connection status            |
 | `help`     | List commands                          |
 | `quit`     | Exit                                   |
 
-## Event System
+## Spatial Awareness
 
-The bridge polls ~50 memory addresses at ~4 Hz and detects game events by diffing consecutive states:
+The bridge provides three layers of spatial information:
 
-- Damage taken, low health warning, death
+### Proximity Zones
+
+Two concentric rings around Link announce objects as he approaches:
+
+- **Ring 2 (~12 tiles)** — "Approaching chest to the north."
+- **Ring 1 (~7 tiles)** — "Nearing chest to the north."
+- **Facing** — "Facing chest." (within Ring 1 and looking at the object)
+
+Tracked objects: doors, chests, switches, pushable blocks, torches, stairs, pits, signs, gravestones, rocks, pots, enemies, NPCs, and other interactable features.
+
+### Forward Cone
+
+A 45-degree cone scan ahead of Link reports all visible interactable tiles (walls, bushes, water, ledges, etc.) with line-of-sight occlusion. Objects behind closer obstacles are hidden. Reports use cardinal directions.
+
+### Blocked Detection
+
+When Link walks into an obstacle, the bridge identifies what's blocking him: "Blocked by bush." / "Blocked by wall."
+
+## Event Detection
+
+The bridge polls ~50 memory addresses at 30 Hz and detects game events by comparing consecutive frames:
+
+- Damage taken, low health warning, death (with game over menu options)
+- Camera transitions with direction
 - Item, key, and equipment pickups
-- Room and area changes with area descriptions (overworld and dungeon)
+- Room and area changes with area descriptions
 - Dungeon enter/exit with dungeon descriptions, floor changes
 - World transitions (light/dark)
 - Enemy proximity alerts with compass direction
 - Dialog text (read from a text dump file)
 - Swimming, pit warnings, boss victories
 - Progress milestones (pendants, crystals)
+
+## Object Tracking
+
+Dynamic sprites (enemies, NPCs, projectiles) are tracked frame-to-frame with velocity computation. The tracker detects sprite slot reuse (e.g., enemy dies and drops an item) and resets tracking for the new entity.
 
 ## Area Descriptions
 
@@ -74,6 +116,10 @@ When moving between overworld screens or entering dungeons, the bridge announces
 ## Dialog Text
 
 Place `text.txt` (an ALttP text dump) next to `bridge.py`. When the game displays dialog, the bridge looks up the message and speaks the text. Without the file, it falls back to announcing that text appeared.
+
+## ASCII Map
+
+The `--map` flag renders a live ASCII map in the terminal showing the area around Link. Tile types are represented as characters (`#` = wall, `~` = water, `.` = pit, `C` = chest, etc.). Link is shown as a directional arrow. Use `--map-overlay` to visualize proximity rings and the forward cone.
 
 ## Troubleshooting
 
@@ -85,3 +131,6 @@ Place `text.txt` (an ALttP text dump) next to `bridge.py`. When the game display
 **Memory reads return None**
 - The core must support `READ_CORE_MEMORY` (bsnes-mercury does)
 - Make sure a game is actively running (not paused in the RetroArch menu)
+
+**No ROM data (missing room/sprite info)**
+- Pass `--rom /path/to/rom.sfc` so the bridge can parse room layouts and sprite placements from the ROM
