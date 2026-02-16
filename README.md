@@ -1,8 +1,20 @@
-# ALttP Accessibility Bridge
+# ALttP Accessibility Navigator
 
 A Link to the Past accessibility tool that polls RetroArch emulator memory, detects game events, and provides screen-reader-friendly output for blind and visually impaired players.
 
 No external dependencies -- uses only the Python standard library.
+
+## Installation
+
+```bash
+# Install from source (editable/dev mode)
+pip install -e .
+
+# Or install normally
+pip install .
+```
+
+This creates the `alttp-navi` command. You can also run via `python -m alttp_assist`.
 
 ## Prerequisites
 
@@ -29,25 +41,25 @@ Or toggle it in the RetroArch UI: **Settings > Network > Network Commands > ON**
 
 ```bash
 # Start the bridge (RetroArch must be running with ALttP loaded)
-python bridge.py --rom /path/to/rom.sfc
+alttp-navi --rom /path/to/rom.sfc
 
 # With live ASCII map overlay
-python bridge.py --rom /path/to/rom.sfc --map
+alttp-navi --rom /path/to/rom.sfc --map
 
-# Map with proximity ring/cone overlays
-python bridge.py --rom /path/to/rom.sfc --map --map-overlay
+# Map with proximity proximity overlays
+alttp-navi --rom /path/to/rom.sfc --map --map-overlay
 
 # Single-shot map snapshot (renders once and exits)
-python bridge.py --rom /path/to/rom.sfc --map-snap
+alttp-navi --rom /path/to/rom.sfc --map-snap
 
 # Debug state dump (writes dump.json and exits)
-python bridge.py --rom /path/to/rom.sfc --dump
+alttp-navi --rom /path/to/rom.sfc --dump
 
 # Diagnostic mode (shows distance/tile data with proximity events)
-python bridge.py --rom /path/to/rom.sfc --diag
+alttp-navi --rom /path/to/rom.sfc --diag
 
 # Custom RetroArch port or poll rate
-python bridge.py --rom /path/to/rom.sfc --port 55356 --poll-hz 15
+alttp-navi --rom /path/to/rom.sfc --port 55356 --poll-hz 15
 ```
 
 ## Commands
@@ -115,7 +127,7 @@ When moving between overworld screens or entering dungeons, the bridge announces
 
 ## Dialog Text
 
-Place `text.txt` (an ALttP text dump) next to `bridge.py`. When the game displays dialog, the bridge looks up the message and speaks the text. Without the file, it falls back to announcing that text appeared.
+Place `text.txt` (an ALttP text dump) next to the package's `cli.py`, or pass `--text /path/to/text.txt`. When the game displays dialog, the bridge looks up the message and speaks the text. Without the file, it falls back to announcing that text appeared.
 
 ## ASCII Map
 

@@ -3,27 +3,51 @@
 ## Project Purpose
 An accessibility bridge for **A Link to the Past** (ALttP) that polls the RetroArch emulator's memory via UDP, detects game events in real time, and produces screen-reader-friendly text output for blind and visually impaired players.
 
-## Files
-- **`bridge.py`** — Main bridge: memory polling, event detection, proximity/cone scanning, map rendering, CLI
-- **`rom_reader.py`** — Parses the ALttP ROM for room geometry, sprites, doors, objects, tile attributes
+## Package Structure
+```
+src/alttp_assist/
+├── __init__.py         # Version
+├── __main__.py         # python -m alttp_assist
+├── cli.py              # main(), argparse entry point
+├── constants.py        # MEMORY_MAP, lookup tables, sprite tables, tile addresses
+├── game_state.py       # GameState dataclass, Sprite
+├── events.py           # EventPriority, Event, EventDetector
+├── proximity.py        # TrackedObject, ObjectTracker, ProximityTracker
+├── map_renderer.py     # MapRenderer (ASCII map)
+├── retroarch.py        # RetroArchClient, read_memory()
+├── poller.py           # MemoryPoller, handle_command(), dump_state(), _say()
+├── text.py             # Dialog text loading from text dump file
+└── rom/
+    ├── __init__.py     # Re-exports RomData, load_rom, etc.
+    ├── data.py         # RomData, RoomData, dataclasses, sprite/door/object types
+    ├── parser.py       # load_rom(), ROM parsing functions
+    ├── tiles.py        # TILE_TYPE_NAMES, MAP16_NAME
+    └── dialog.py       # Dialog alphabet/dictionary, parse_dialog_strings()
+```
 - **`dump.json`** — Debug snapshot written by `--dump` flag or `dump` command at runtime
 
 ## ROM Location
 `/home/rishi/.config/retroarch/downloads/Legend of Zelda, The - A Link to the Past (USA).sfc`
 
+## Installation
+```bash
+pip install -e .       # editable/dev install
+alttp-navi --help    # or: python -m alttp_assist --help
+```
+
 ## Running
 ```bash
 # Normal mode (screen-reader output)
-python bridge.py --rom <path-to-rom>
+alttp-navi --rom <path-to-rom>
 
 # With ASCII map
-python bridge.py --rom <path-to-rom> --map
+alttp-navi --rom <path-to-rom> --map
 
 # Single-shot debug dump
-python bridge.py --rom <path-to-rom> --dump
+alttp-navi --rom <path-to-rom> --dump
 
 # Map snapshot (renders once and exits)
-python bridge.py --rom <path-to-rom> --map-snap
+alttp-navi --rom <path-to-rom> --map-snap
 ```
 
 ## Architecture Overview
@@ -40,29 +64,25 @@ python bridge.py --rom <path-to-rom> --map-snap
 4. Events sorted by priority, printed via `_say()`
 5. Sleeps `1/poll_hz` (default 30 Hz)
 
-### Key Classes in bridge.py
+### Key Classes
 
-| Class | Purpose |
-|---|---|
-| `GameState` | Snapshot of all watched memory values with helper properties |
-| `EventDetector` | Frame-diff event detection (damage, room change, blocked, items, etc.) |
-| `ProximityTracker` | Zone-based proximity announcements + forward cone scan |
-| `ObjectTracker` | Frame-to-frame object tracking with EMA velocity for dynamic sprites |
-| `TrackedObject` | Single tracked entity (static feature or dynamic sprite) |
-| `MapRenderer` | ASCII map rendering in terminal |
-| `RetroArchClient` | UDP client for RetroArch network command interface |
-| `MemoryPoller` | Main polling loop orchestrating everything |
-
-### Key Classes in rom_reader.py
-
-| Class | Purpose |
-|---|---|
-| `RomData` | Top-level ROM data container with room/sprite lookup methods |
-| `RoomData` | Parsed room: header, doors, objects, sprites |
-| `RoomHeader` | Room metadata (tileset, floor, layout, etc.) |
-| `RoomObject` | Dungeon object with tile position and category |
-| `DoorObject` | Door with direction, position, type |
-| `RoomSprite` | Sprite placement from ROM |
+| Class | Module | Purpose |
+|---|---|---|
+| `GameState` | `game_state` | Snapshot of all watched memory values with helper properties |
+| `Sprite` | `game_state` | One SNES sprite table entry |
+| `EventDetector` | `events` | Frame-diff event detection (damage, room change, blocked, items, etc.) |
+| `ProximityTracker` | `proximity` | Zone-based proximity announcements + forward cone scan |
+| `ObjectTracker` | `proximity` | Frame-to-frame object tracking with EMA velocity for dynamic sprites |
+| `TrackedObject` | `proximity` | Single tracked entity (static feature or dynamic sprite) |
+| `MapRenderer` | `map_renderer` | ASCII map rendering in terminal |
+| `RetroArchClient` | `retroarch` | UDP client for RetroArch network command interface |
+| `MemoryPoller` | `poller` | Main polling loop orchestrating everything |
+| `RomData` | `rom.data` | Top-level ROM data container with room/sprite lookup methods |
+| `RoomData` | `rom.data` | Parsed room: header, doors, objects, sprites |
+| `RoomHeader` | `rom.data` | Room metadata (tileset, floor, layout, etc.) |
+| `RoomObject` | `rom.data` | Dungeon object with tile position and category |
+| `DoorObject` | `rom.data` | Door with direction, position, type |
+| `RoomSprite` | `rom.data` | Sprite placement from ROM |
 
 ## SNES Memory Map (Key Addresses)
 
@@ -116,11 +136,11 @@ Note: `py` is in pixel units, `tx` is in 8px tile units. This asymmetry is how A
 
 ### Three-Layer Lookup (Overworld)
 1. **map16 index** — read from WRAM `$7E:2000` table (16×16 pixel tiles)
-2. **Graphic-based name** — `RomData._MAP16_NAME` maps specific map16 indices to names (most reliable for overworld)
+2. **Graphic-based name** — `rom.tiles.MAP16_NAME` maps specific map16 indices to names (most reliable for overworld)
 3. **Tile attribute** — map16 → map8 → tileattr chain via ROM tables → `TILE_TYPE_NAMES` (fallback)
 
 ### Why Graphic-Based ID Matters
-Multiple distinct objects share the same tile attribute (e.g., attr `0x54` = liftable boulder, sign, AND pot). The map16 index uniquely identifies the visual graphic, so `_MAP16_NAME` provides reliable names.
+Multiple distinct objects share the same tile attribute (e.g., attr `0x54` = liftable boulder, sign, AND pot). The map16 index uniquely identifies the visual graphic, so `MAP16_NAME` provides reliable names.
 
 ### Dungeon Tiles
 Read directly from `$7F:2000` attribute table. Indoor walls use a separate set of attribute values (`GameState._INDOOR_WALL_TILES`).
@@ -198,7 +218,7 @@ All distance calculations use body centre, not sprite origin.
 The WRAM offset formula uses **pixel** Y but **8px tile** X. This is not a bug — it matches ALttP's scroll engine.
 
 ### Dataclass ClassVar
-When adding class-level constants (like `_MAP16_NAME`) to a `@dataclass`, use `ClassVar[dict[...]]` annotation. Otherwise Python treats it as a mutable default field and raises `ValueError`.
+When adding class-level constants to a `@dataclass`, use `ClassVar[dict[...]]` annotation. Otherwise Python treats it as a mutable default field and raises `ValueError`. (Note: `MAP16_NAME` was moved to module-level in `rom/tiles.py` to avoid this issue.)
 
 ### Map16 Shared Attributes
 Tile attribute `0x54` is shared by liftable boulder, sign, and pot on the overworld. Always prefer `ow_tile_name()` (graphic-based) over `ow_tile_attr()` for overworld identification.
@@ -212,13 +232,13 @@ When an enemy dies and drops an item, the same sprite slot gets reused with a di
 ## Debugging
 ```bash
 # Dump full state to JSON
-python bridge.py --rom <rom> --dump
+alttp-navi --rom <rom> --dump
 
 # Runtime dump command (type "dump" while bridge is running)
 dump
 
 # Diagnostic mode (shows distance/tile info with proximity events)
-python bridge.py --rom <rom> --diag
+alttp-navi --rom <rom> --diag
 ```
 
 The dump includes: raw memory values, interpreted state, live sprites, ROM data for current area, and area descriptions. Use it to diagnose misidentified tiles or missing detections.
