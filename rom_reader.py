@@ -15,7 +15,7 @@ import struct
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import ClassVar, Optional
 
 
 # ─── Constants ───────────────────────────────────────────────────────────────
@@ -766,7 +766,7 @@ TILE_TYPE_NAMES: dict[int, str] = {
     0x4B: "warp tile",
     0x50: "bush", 0x51: "bush",
     0x52: "liftable rock", 0x53: "liftable rock",
-    0x54: "liftable pot", 0x55: "liftable pot", 0x56: "liftable pot",
+    0x54: "liftable boulder", 0x55: "liftable boulder", 0x56: "liftable boulder",
     0x57: "dashable rocks",
     0x58: "chest", 0x59: "chest", 0x5A: "chest",
     0x5B: "chest", 0x5C: "chest", 0x5D: "chest",
@@ -808,6 +808,30 @@ class RomData:
 
     def get_ow_sprites(self, screen_id: int) -> list[RoomSprite]:
         return self.ow_sprites.get(screen_id, [])
+
+    # Map16 index -> human name, keyed by the graphic tiles drawn.
+    # Many visually distinct objects share the same tile attribute byte
+    # (e.g. signs, pots, and skulls all use "liftable" attrs 0x54-0x56).
+    # This table lets the accessibility layer report what the player sees.
+    _MAP16_NAME: ClassVar[dict[int, str]] = {
+        0x0036: "bush",
+        0x0064: "gravestone", 0x006F: "gravestone",
+        0x0190: "gravestone", 0x019A: "gravestone",
+        0x01A0: "gravestone", 0x038F: "gravestone",
+        0x0101: "sign",
+        0x020F: "liftable rock",
+        0x0239: "liftable rock",
+        0x023B: "dark rock", 0x023C: "dark rock",
+        0x023D: "dark rock", 0x023E: "dark rock",
+        0x0226: "dashable rocks", 0x0227: "dashable rocks",
+        0x0228: "dashable rocks", 0x0229: "dashable rocks",
+        0x036D: "liftable pot", 0x036E: "liftable pot",
+        0x0374: "liftable pot", 0x0375: "liftable pot",
+    }
+
+    def ow_tile_name(self, map16_index: int) -> Optional[str]:
+        """Return a graphic-based name for a map16 tile, or None."""
+        return self._MAP16_NAME.get(map16_index)
 
     def ow_tile_attr(self, map16_index: int, x: int, y: int) -> int:
         """Look up the overworld tile attribute for a map16 tile.
