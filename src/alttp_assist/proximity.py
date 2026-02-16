@@ -548,11 +548,19 @@ class ProximityTracker:
                 if obscured:
                     continue
                 name = solid[(dx, dy)]
-                # Snap to pure cardinal (no diagonals) — pick dominant axis
-                if abs(dx) >= abs(dy):
-                    cardinal = "east" if dx > 0 else "west"
-                else:
-                    cardinal = "south" if dy > 0 else "north"
+                # Prefer the lateral (off-axis) direction over the
+                # forward direction — the cone already implies "ahead",
+                # so the player needs to know which side the object is on.
+                if direction in (0, 2):  # north/south: lateral is x
+                    if dx != 0:
+                        cardinal = "east" if dx > 0 else "west"
+                    else:
+                        cardinal = "south" if dy > 0 else "north"
+                else:  # east/west: lateral is y
+                    if dy != 0:
+                        cardinal = "south" if dy > 0 else "north"
+                    else:
+                        cardinal = "east" if dx > 0 else "west"
                 visible.append((name, cardinal))
 
         if not visible:
