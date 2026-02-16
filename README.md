@@ -1,5 +1,7 @@
 # ALttP Accessibility Navigator
 
+Note that this is still an experimental tool with a lot of bugs.
+
 A Link to the Past accessibility tool that polls RetroArch emulator memory, detects game events, and provides screen-reader-friendly output for blind and visually impaired players.
 
 No external dependencies -- uses only the Python standard library.

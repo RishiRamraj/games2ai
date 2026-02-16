@@ -9,6 +9,7 @@ from typing import Optional
 
 from alttp_assist.constants import (
     LINK_STATE_NAMES,
+    MEMORY_MAP,
     MODULE_NAMES,
     _direction_label,
 )
@@ -271,6 +272,7 @@ COMMANDS: dict[str, str] = {
     "health":   "Health, magic, and resources",
     "items":    "Equipment and inventory",
     "enemies":  "Nearby enemies and directions",
+    "heal":     "Restore one heart of health",
     "scan":     "Nearby room features (doors, chests, hazards)",
     "dump":     "Write full state snapshot to dump.json",
     "diag":     "Dump raw room features (diagnostic)",
@@ -322,6 +324,24 @@ def handle_command(cmd: str, poller: MemoryPoller,
     if cmd == "health":
         state = poller.get_state()
         _say(state.format_resources() if state else _NO_STATE)
+        return True
+
+    if cmd == "heal":
+        state = poller.get_state()
+        if not state:
+            _say(_NO_STATE)
+        else:
+            hp = state.get("hp")
+            max_hp = state.get("max_hp")
+            if hp >= max_hp:
+                _say("Already at full health.")
+            else:
+                new_hp = min(hp + 8, max_hp)
+                addr = MEMORY_MAP["hp"][0]
+                ra.write_core_memory(addr, bytes([new_hp]))
+                hearts = new_hp / 8.0
+                label = f"{int(hearts)}" if hearts == int(hearts) else f"{hearts:.1f}"
+                _say(f"Healed to {label}/{int(max_hp / 8)} hearts.")
         return True
 
     if cmd == "items":

@@ -187,9 +187,10 @@ class EventDetector:
                 events.append(Event("ENTERED_BUILDING", EventPriority.LOW,
                                     "Exited to the outdoors."))
 
-        # Item acquired (slot 0 -> non-zero)
+        # Item acquired (slot 0 -> non-zero; skip if either read was None)
         for key in _INVENTORY_KEYS:
-            if prev.get(key) == 0 and curr.get(key) != 0:
+            if (prev.raw.get(key) == 0 and curr.raw.get(key) is not None
+                    and curr.raw.get(key) != 0):
                 name = curr.item_name(key)
                 if name:
                     events.append(Event(
@@ -198,9 +199,10 @@ class EventDetector:
                         {"item": key, "name": name},
                     ))
 
-        # Equipment upgrade
+        # Equipment upgrade (skip if either read was None)
         for key in ("sword", "shield", "armor", "gloves"):
-            if curr.get(key) > prev.get(key):
+            if (prev.raw.get(key) is not None and curr.raw.get(key) is not None
+                    and curr.get(key) > prev.get(key)):
                 name = TIERED_ITEMS[key].get(curr.get(key), "unknown")
                 events.append(Event(
                     "EQUIPMENT_UPGRADE", EventPriority.MEDIUM,
@@ -211,7 +213,9 @@ class EventDetector:
         # Key acquired (0xFF = uninitialised / outside dungeon, not a real count)
         curr_keys = curr.get("keys")
         prev_keys = prev.get("keys")
-        if curr_keys != 0xFF and prev_keys != 0xFF and curr_keys > prev_keys:
+        if (curr.raw.get("keys") is not None and prev.raw.get("keys") is not None
+                and curr_keys != 0xFF and prev_keys != 0xFF
+                and curr_keys > prev_keys):
             events.append(Event(
                 "KEY_ACQUIRED", EventPriority.LOW,
                 f"Got a key! Keys: {curr_keys}.",

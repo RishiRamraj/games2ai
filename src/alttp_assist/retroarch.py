@@ -59,6 +59,12 @@ class RetroArchClient:
         except (ValueError, IndexError):
             return None
 
+    def write_core_memory(self, address: int, data: bytes) -> bool:
+        hex_bytes = " ".join(f"{b:02X}" for b in data)
+        cmd = f"WRITE_CORE_MEMORY {address:X} {hex_bytes}"
+        resp = self._send_command(cmd)
+        return bool(resp) and "WRITE_CORE_MEMORY -1" not in resp
+
     def close(self):
         if self._sock:
             self._sock.close()
