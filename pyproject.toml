@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alttp-navi"
+version = "0.1.0"
+description = "A Link to the Past accessibility bridge for RetroArch"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+
+[project.scripts]
+alttp-navi = "alttp_assist.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
